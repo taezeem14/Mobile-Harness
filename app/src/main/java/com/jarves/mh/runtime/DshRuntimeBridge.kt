@@ -547,6 +547,9 @@ class DshRuntimeBridge(
         } else {
             sb.appendLine("The optional Android build toolchain is not installed in this PocketDev runtime. You may create Android project files, but do not claim that Gradle, the Android SDK, or aapt2 is available and do not present build or install commands as verified. Tell the user to add the Android development stack in PocketDev Settings before building.")
         }
+        if (installer.isStackInstalled(DevStack.FLUTTER)) {
+            sb.appendLine("If this is a Flutter project, Flutter and Dart are installed. You can create projects with `flutter create .` and preview web builds using `flutter run -d web-server --web-port 8080 --web-hostname 127.0.0.1` so the in-app Web Preview can display it.")
+        }
         sb.appendLine("For local servers, give a clear start command and never use a kill command that searches its own command text with pgrep, because it can terminate the terminal itself.")
         sb.appendLine("</project_workspace>")
         sb.appendLine()

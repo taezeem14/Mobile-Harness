@@ -673,6 +673,13 @@ class RuntimeInstaller(private val context: Context) {
                 removePath(File(rootfs, "root/.cache/composer"))
                 removePath(File(rootfs, "root/.composer"))
             }
+            DevStack.FLUTTER -> {
+                removePath(File(rootfs, "opt/flutter"))
+                removePath(File(rootfs, "usr/local/bin/flutter"))
+                removePath(File(rootfs, "usr/local/bin/dart"))
+                removePath(File(rootfs, "root/.pub-cache"))
+                removePath(File(rootfs, "root/.flutter"))
+            }
         }
 
         writeDevStackState(readDevStackState().apply { put(stack.name, false) })
@@ -795,6 +802,9 @@ class RuntimeInstaller(private val context: Context) {
                 installComposer(proot, from, onProgress)
                 verifyGuest(proot, "php --version && composer --version", "PHP tools could not be verified")
             }
+            DevStack.FLUTTER -> {
+                installFlutterToolchain(proot, from, to, onProgress)
+            }
         }
         if (!verified) return
         writeDevStackState(readDevStackState().apply { put(stack.name, true) })
@@ -834,6 +844,39 @@ class RuntimeInstaller(private val context: Context) {
         staged.delete()
         Os.chmod(composer.absolutePath, 0b111101101)
         onProgress(RuntimeInstallProgress("Installing Composer", fraction))
+    }
+
+    private suspend fun installFlutterToolchain(
+        proot: File,
+        from: Float,
+        to: Float,
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ) {
+        onProgress(RuntimeInstallProgress("Configuring Flutter & Dart prerequisites", from))
+        aptInstall(
+            proot,
+            listOf("curl", "git", "unzip", "xz-utils", "zip", "libglu1-mesa"),
+            "Installing Flutter system dependencies",
+            from,
+            onProgress,
+        )
+        val flutterDir = File(rootfs, "opt/flutter")
+        if (!File(flutterDir, "bin/flutter").isFile) {
+            onProgress(RuntimeInstallProgress("Downloading Flutter SDK (stable)", (from + to) / 2f, indeterminate = true))
+            runGuestCommand(
+                proot = proot,
+                command = "git clone -b stable --depth 1 https://github.com/flutter/flutter.git /opt/flutter && " +
+                    "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && " +
+                    "ln -sf /opt/flutter/bin/dart /usr/local/bin/dart && " +
+                    "/opt/flutter/bin/flutter config --no-analytics",
+                displayCommand = "git clone Flutter SDK & configure CLI",
+                fraction = to,
+                timeoutMs = 30 * 60 * 1_000L,
+                onProgress = onProgress,
+                failureMessage = "Flutter SDK could not be installed",
+            )
+        }
+        verifyGuest(proot, "flutter --version || dart --version", "Flutter & Dart tools could not be verified")
     }
 
     private suspend fun installAndroidToolchain(
@@ -1094,13 +1137,18 @@ class RuntimeInstaller(private val context: Context) {
 
     fun isStackInstalled(stack: DevStack): Boolean {
         if (readDevStackState()[stack.name] != true) return false
-        if (stack != DevStack.ANDROID) return true
-        return File(rootfs, "root/.pocket-android-tools-version").readTextOrNull() == ANDROID_TOOLS_VERSION &&
-            File(rootfs, "root/android-sdk/platforms/android-36/android.jar").isFile &&
-            File(rootfs, "root/android-sdk/build-tools/35.0.0/aapt2").isFile &&
-            File(rootfs, "opt/gradle/gradle-8.14.3/bin/gradle").isFile &&
-            File(rootfs, "root/maven/localMvnRepository").let { it.isDirectory && !it.list().isNullOrEmpty() } &&
-            File(rootfs, "root/.gradle/init.d/pocketdev-android.gradle").isFile
+        if (stack == DevStack.ANDROID) {
+            return File(rootfs, "root/.pocket-android-tools-version").readTextOrNull() == ANDROID_TOOLS_VERSION &&
+                File(rootfs, "root/android-sdk/platforms/android-36/android.jar").isFile &&
+                File(rootfs, "root/android-sdk/build-tools/35.0.0/aapt2").isFile &&
+                File(rootfs, "opt/gradle/gradle-8.14.3/bin/gradle").isFile &&
+                File(rootfs, "root/maven/localMvnRepository").let { it.isDirectory && !it.list().isNullOrEmpty() } &&
+                File(rootfs, "root/.gradle/init.d/pocketdev-android.gradle").isFile
+        }
+        if (stack == DevStack.FLUTTER) {
+            return File(rootfs, "opt/flutter/bin/flutter").isFile || File(rootfs, "usr/local/bin/flutter").exists()
+        }
+        return true
     }
 
     private fun readDevStackState(): MutableMap<String, Boolean> {

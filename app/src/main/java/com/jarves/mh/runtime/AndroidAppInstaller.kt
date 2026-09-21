@@ -20,7 +20,7 @@ object AndroidAppInstaller {
         if (isMiuiDevice()) {
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", apk)
             context.startActivity(
-                Intent(Intent.ACTION_INSTALL_PACKAGE, uri).apply {
+                Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "application/vnd.android.package-archive")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
                 },

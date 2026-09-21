@@ -518,6 +518,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
+        if (requiresFlutterToolchain(normalized) && !installer.isStackInstalled(DevStack.FLUTTER)) {
+            _state.update {
+                it.copy(toastMessage = "Flutter & Dart tools are not installed. Add Flutter in Settings → Development stacks.")
+            }
+            return
+        }
         if (isDestructiveTerminalCommand(normalized)) {
             _state.update { it.copy(pendingTerminalCommand = normalized) }
         } else {
@@ -777,11 +783,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun detectServerUrl(command: String): String? {
-        val match = Regex("""python(?:3)?\s+-m\s+http\.server(?:\s+(\d{2,5}))?""")
+        val pythonMatch = Regex("""python(?:3)?\s+-m\s+http\.server(?:\s+(\d{2,5}))?""")
             .find(command)
-            ?: return null
-        val port = match.groupValues.getOrNull(1)?.toIntOrNull() ?: 8000
-        return port.takeIf { it in 1..65535 }?.let { "http://127.0.0.1:$it/" }
+        if (pythonMatch != null) {
+            val port = pythonMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: 8000
+            return port.takeIf { it in 1..65535 }?.let { "http://127.0.0.1:$it/" }
+        }
+        val flutterMatch = Regex("""flutter\s+run\s+.*--web-port(?:=|\s+)(\d{2,5})""")
+            .find(command)
+        if (flutterMatch != null) {
+            val port = flutterMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: 8080
+            return port.takeIf { it in 1..65535 }?.let { "http://127.0.0.1:$it/" }
+        }
+        return null
     }
 
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
@@ -921,6 +935,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun requiresAndroidToolchain(command: String): Boolean =
         Regex("(?m)(^|[;&|]\\s*)(?:\\./)?gradle(?:w)?(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(command)
+
+    private fun requiresFlutterToolchain(command: String): Boolean =
+        Regex("(?m)(^|[;&|]\\s*)(?:flutter|dart)(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(command)
 
 
     fun toggleTheme() {

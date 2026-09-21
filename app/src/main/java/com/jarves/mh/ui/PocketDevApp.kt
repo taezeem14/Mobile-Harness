@@ -85,7 +85,8 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
@@ -781,6 +782,11 @@ private fun getDevStackVisuals(stack: DevStack): DevStackVisuals = when (stack) 
         accentColor = Color(0xFF818CF8),
         tag = "php-cli + Composer",
     )
+    DevStack.FLUTTER -> DevStackVisuals(
+        icon = Icons.Default.PhoneAndroid,
+        accentColor = Color(0xFF02569B),
+        tag = "Flutter + Dart SDK",
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1194,6 +1200,10 @@ private fun setupTimeEstimate(selected: Set<DevStack>): String {
         minimumMinutes += 2
         maximumMinutes += 4
     }
+    if (DevStack.FLUTTER in selected) {
+        minimumMinutes += 3
+        maximumMinutes += 5
+    }
     return "$minimumMinutes–$maximumMinutes minutes"
 }
 
@@ -1215,12 +1225,12 @@ private fun toolchainDownloadSummary(selected: Set<DevStack>, agent: AgentKind):
         } +
         (if (DevStack.PYTHON in selected) PYTHON_RUNTIME_DOWNLOAD_MB else 0) +
         (if (DevStack.ANDROID in selected) ANDROID_RUNTIME_DOWNLOAD_MB else 0)
-    val laterPackages = selected.intersect(setOf(DevStack.CPP, DevStack.PHP))
+    val laterPackages = selected.intersect(setOf(DevStack.CPP, DevStack.PHP, DevStack.FLUTTER))
     return buildString {
         append("Download: ")
         append(total)
         append(" MB")
-        if (laterPackages.isNotEmpty()) append(" · C/PHP packages download later")
+        if (laterPackages.isNotEmpty()) append(" · C/PHP/Flutter packages download later")
         if (total >= 500) append(" · Wi-Fi recommended")
     }
 }
@@ -1239,6 +1249,7 @@ private fun DevStackChoiceRow(
         DevStack.ANDROID -> "Java and Kotlin build tools"
         DevStack.CPP -> "Native apps and command-line tools"
         DevStack.PHP -> "PHP sites and Laravel projects"
+        DevStack.FLUTTER -> "Cross-platform mobile and web apps"
     }
 
     Row(
@@ -3129,7 +3140,7 @@ private fun ProjectsScreen(
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Chat,
+                            imageVector = Icons.AutoMirrored.Filled.Chat,
                             contentDescription = null,
                             modifier = Modifier.size(17.dp),
                         )

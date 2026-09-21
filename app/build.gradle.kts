@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 import org.gradle.api.tasks.Sync
 
@@ -54,9 +55,27 @@ fun buildConfigString(value: String): String =
 android {
     namespace = "com.jarves.mh"
     compileSdk = 36
-    // F-Droid's r26b recipe installs 26.1.10909125. Keep AGP from selecting
-    // its newer default NDK; local developers may override this explicitly.
-    ndkVersion = providers.gradleProperty("mhNdkVersion").orNull ?: "26.1.10909125"
+    // Default to r26b for F-Droid reproducibility, but automatically detect
+    // newer installed NDKs on developer systems to prevent CXX1100 configuration errors.
+    val explicitNdk = providers.gradleProperty("mhNdkVersion").orNull
+    if (!explicitNdk.isNullOrBlank()) {
+        ndkVersion = explicitNdk
+    } else {
+        val sdkRoot = providers.environmentVariable("ANDROID_HOME").orNull
+            ?: providers.environmentVariable("ANDROID_SDK_ROOT").orNull
+            ?: "D:/Android"
+        val ndkFolder = File(sdkRoot, "ndk")
+        val localNdks: List<String> = if (ndkFolder.isDirectory) {
+            ndkFolder.listFiles()?.filter { f -> f.isDirectory }?.map { f -> f.name } ?: emptyList<String>()
+        } else {
+            emptyList<String>()
+        }
+        ndkVersion = when {
+            "26.1.10909125" in localNdks -> "26.1.10909125"
+            localNdks.isNotEmpty() -> localNdks.sorted().last()
+            else -> "26.1.10909125"
+        }
+    }
 
     signingConfigs {
         if (hasUploadSigning) {
@@ -142,7 +161,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions.jvmTarget = "17"
     buildFeatures {
         compose = true
         buildConfig = true
@@ -204,4 +222,8 @@ dependencies {
     testImplementation("org.json:json:20250107")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
 }
