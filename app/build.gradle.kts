@@ -61,11 +61,24 @@ android {
     if (!explicitNdk.isNullOrBlank()) {
         ndkVersion = explicitNdk
     } else {
-        val sdkRoot = providers.environmentVariable("ANDROID_HOME").orNull
+        val localProps = Properties().apply {
+            val localFile = rootProject.file("local.properties")
+            if (localFile.isFile) localFile.inputStream().use(::load)
+        }
+        val osDefaultSdk = when {
+            System.getProperty("os.name", "").lowercase().contains("win") ->
+                System.getenv("LOCALAPPDATA")?.let { "$it/Android/Sdk" } ?: "D:/Android"
+            System.getProperty("os.name", "").lowercase().contains("mac") ->
+                "${System.getProperty("user.home")}/Library/Android/sdk"
+            else ->
+                "${System.getProperty("user.home")}/Android/Sdk"
+        }
+        val sdkRoot = localProps.getProperty("sdk.dir")
+            ?: providers.environmentVariable("ANDROID_HOME").orNull
             ?: providers.environmentVariable("ANDROID_SDK_ROOT").orNull
-            ?: "D:/Android"
-        val ndkFolder = File(sdkRoot, "ndk")
-        val localNdks: List<String> = if (ndkFolder.isDirectory) {
+            ?: osDefaultSdk
+        val ndkFolder = listOf(File(sdkRoot, "ndk"), File(sdkRoot, "ndk-bundle")).firstOrNull { it.isDirectory }
+        val localNdks: List<String> = if (ndkFolder != null && ndkFolder.isDirectory) {
             ndkFolder.listFiles()?.filter { f -> f.isDirectory }?.map { f -> f.name } ?: emptyList<String>()
         } else {
             emptyList<String>()

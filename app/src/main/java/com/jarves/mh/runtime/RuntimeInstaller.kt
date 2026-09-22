@@ -203,6 +203,9 @@ class RuntimeInstaller(private val context: Context) {
 
         val missingStacks = selectedStacks.filterNot(::isStackInstalled)
         missingStacks.forEachIndexed { index, stack ->
+            if (BuildConfig.OFFLINE_RUNTIME_BUNDLES && stack in setOf(DevStack.CPP, DevStack.PHP, DevStack.FLUTTER)) {
+                return@forEachIndexed
+            }
             val slice = 0.26f / maxOf(1, missingStacks.size)
             val from = 0.72f + index * slice
             applyStack(proot, stack, from, from + slice, onProgress)
@@ -852,6 +855,9 @@ class RuntimeInstaller(private val context: Context) {
         to: Float,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
+        check(!BuildConfig.OFFLINE_RUNTIME_BUNDLES) {
+            "Flutter toolchain installation requires an internet connection and the online edition."
+        }
         onProgress(RuntimeInstallProgress("Configuring Flutter & Dart prerequisites", from))
         aptInstall(
             proot,
@@ -861,11 +867,16 @@ class RuntimeInstaller(private val context: Context) {
             onProgress,
         )
         val flutterDir = File(rootfs, "opt/flutter")
-        if (!File(flutterDir, "bin/flutter").isFile) {
+        val flutterBin = File(flutterDir, "bin/flutter")
+        if (!flutterBin.isFile) {
+            if (flutterDir.exists()) {
+                removePath(flutterDir)
+            }
             onProgress(RuntimeInstallProgress("Downloading Flutter SDK (stable)", (from + to) / 2f, indeterminate = true))
             runGuestCommand(
                 proot = proot,
-                command = "git clone -b stable --depth 1 https://github.com/flutter/flutter.git /opt/flutter && " +
+                command = "rm -rf /opt/flutter && " +
+                    "git clone -b stable --depth 1 https://github.com/flutter/flutter.git /opt/flutter && " +
                     "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && " +
                     "ln -sf /opt/flutter/bin/dart /usr/local/bin/dart && " +
                     "/opt/flutter/bin/flutter config --no-analytics",
@@ -875,6 +886,8 @@ class RuntimeInstaller(private val context: Context) {
                 onProgress = onProgress,
                 failureMessage = "Flutter SDK could not be installed",
             )
+        } else {
+            verifyGuest(proot, "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && ln -sf /opt/flutter/bin/dart /usr/local/bin/dart", "Failed to link Flutter CLI")
         }
         verifyGuest(proot, "flutter --version || dart --version", "Flutter & Dart tools could not be verified")
     }
@@ -1146,7 +1159,8 @@ class RuntimeInstaller(private val context: Context) {
                 File(rootfs, "root/.gradle/init.d/pocketdev-android.gradle").isFile
         }
         if (stack == DevStack.FLUTTER) {
-            return File(rootfs, "opt/flutter/bin/flutter").isFile || File(rootfs, "usr/local/bin/flutter").exists()
+            return File(rootfs, "opt/flutter/bin/flutter").isFile &&
+                File(rootfs, "opt/flutter/bin/flutter").canExecute()
         }
         return true
     }

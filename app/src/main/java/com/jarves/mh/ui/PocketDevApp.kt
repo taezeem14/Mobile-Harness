@@ -1210,13 +1210,20 @@ private fun setupTimeEstimate(selected: Set<DevStack>): String {
 private fun stackDownloadLabel(stack: DevStack): String = when {
     stack == DevStack.WEB -> " · included"
     BuildConfig.OFFLINE_RUNTIME_BUNDLES && stack in setOf(DevStack.PYTHON, DevStack.ANDROID) -> " · included"
+    BuildConfig.OFFLINE_RUNTIME_BUNDLES && stack in setOf(DevStack.CPP, DevStack.PHP, DevStack.FLUTTER) -> " · requires internet"
     !BuildConfig.OFFLINE_RUNTIME_BUNDLES && stack == DevStack.PYTHON -> " · 55 MB"
     !BuildConfig.OFFLINE_RUNTIME_BUNDLES && stack == DevStack.ANDROID -> " · 570 MB"
     else -> ""
 }
 
 private fun toolchainDownloadSummary(selected: Set<DevStack>, agent: AgentKind): String {
-    if (BuildConfig.OFFLINE_RUNTIME_BUNDLES) return "All selected bundles are included in this offline app"
+    val laterPackages = selected.intersect(setOf(DevStack.CPP, DevStack.PHP, DevStack.FLUTTER))
+    if (BuildConfig.OFFLINE_RUNTIME_BUNDLES) {
+        return buildString {
+            append("Offline bundles included")
+            if (laterPackages.isNotEmpty()) append(" · C/PHP/Flutter require internet later")
+        }
+    }
     val total = CORE_RUNTIME_DOWNLOAD_MB +
         when (agent) {
             AgentKind.CLAUDE_CODE -> CLAUDE_RUNTIME_DOWNLOAD_MB
@@ -1225,7 +1232,6 @@ private fun toolchainDownloadSummary(selected: Set<DevStack>, agent: AgentKind):
         } +
         (if (DevStack.PYTHON in selected) PYTHON_RUNTIME_DOWNLOAD_MB else 0) +
         (if (DevStack.ANDROID in selected) ANDROID_RUNTIME_DOWNLOAD_MB else 0)
-    val laterPackages = selected.intersect(setOf(DevStack.CPP, DevStack.PHP, DevStack.FLUTTER))
     return buildString {
         append("Download: ")
         append(total)
