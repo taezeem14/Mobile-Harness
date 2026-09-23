@@ -25,4 +25,9 @@ class DevStackTest {
         assertTrue("PHP" in names)
         assertTrue("FLUTTER" in names)
     }
+
+    @Test
+    fun flutterVersionIsPinned() {
+        assertEquals("3.29.0", com.jarves.mh.runtime.RuntimeInstaller.FLUTTER_VERSION)
+    }
 }

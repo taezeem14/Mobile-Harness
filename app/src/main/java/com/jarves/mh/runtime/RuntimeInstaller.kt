@@ -70,6 +70,7 @@ class RuntimeInstaller(private val context: Context) {
     private val githubCliMarker = File(rootfs, ".pocket-github-cli-version")
     private val dshAndroidCompatibilityMarker = File(rootfs, ".pocket-dsh-android-compat-version")
     private val macosMetadataRepairMarker = File(rootfs, ".pocket-macos-metadata-repair")
+    private val flutterMarker = File(rootfs, ".pocket-flutter-version")
 
     fun isInstalled(): Boolean {
         val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
@@ -682,6 +683,7 @@ class RuntimeInstaller(private val context: Context) {
                 removePath(File(rootfs, "usr/local/bin/dart"))
                 removePath(File(rootfs, "root/.pub-cache"))
                 removePath(File(rootfs, "root/.flutter"))
+                removePath(flutterMarker)
             }
         }
 
@@ -849,6 +851,21 @@ class RuntimeInstaller(private val context: Context) {
         onProgress(RuntimeInstallProgress("Installing Composer", fraction))
     }
 
+    private fun isFlutterSdkComplete(flutterDir: File): Boolean {
+        if (!flutterDir.isDirectory) return false
+        val flutterBin = File(flutterDir, "bin/flutter")
+        val dartBin = File(flutterDir, "bin/dart")
+        val engineVersion = File(flutterDir, "bin/internal/engine.version")
+        val pubspec = File(flutterDir, "packages/flutter/pubspec.yaml")
+        val gitDir = File(flutterDir, ".git")
+        return flutterMarker.readTextOrNull() == FLUTTER_VERSION &&
+            flutterBin.isFile &&
+            dartBin.isFile &&
+            engineVersion.isFile &&
+            pubspec.isFile &&
+            gitDir.isDirectory
+    }
+
     private suspend fun installFlutterToolchain(
         proot: File,
         from: Float,
@@ -867,29 +884,53 @@ class RuntimeInstaller(private val context: Context) {
             onProgress,
         )
         val flutterDir = File(rootfs, "opt/flutter")
-        val flutterBin = File(flutterDir, "bin/flutter")
-        if (!flutterBin.isFile) {
+        if (!isFlutterSdkComplete(flutterDir)) {
             if (flutterDir.exists()) {
                 removePath(flutterDir)
             }
-            onProgress(RuntimeInstallProgress("Downloading Flutter SDK (stable)", (from + to) / 2f, indeterminate = true))
+            flutterMarker.delete()
+            onProgress(RuntimeInstallProgress("Downloading Flutter SDK $FLUTTER_VERSION", (from + to) / 2f, indeterminate = true))
             runGuestCommand(
                 proot = proot,
                 command = "rm -rf /opt/flutter && " +
-                    "git clone -b stable --depth 1 https://github.com/flutter/flutter.git /opt/flutter && " +
+                    "git clone --depth 1 --branch $FLUTTER_VERSION $FLUTTER_GIT_REPO /opt/flutter && " +
+                    "git config --global --add safe.directory /opt/flutter 2>/dev/null || true && " +
                     "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && " +
                     "ln -sf /opt/flutter/bin/dart /usr/local/bin/dart && " +
                     "/opt/flutter/bin/flutter config --no-analytics",
-                displayCommand = "git clone Flutter SDK & configure CLI",
+                displayCommand = "git clone Flutter SDK $FLUTTER_VERSION & configure CLI",
                 fraction = to,
                 timeoutMs = 30 * 60 * 1_000L,
                 onProgress = onProgress,
                 failureMessage = "Flutter SDK could not be installed",
             )
         } else {
-            verifyGuest(proot, "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && ln -sf /opt/flutter/bin/dart /usr/local/bin/dart", "Failed to link Flutter CLI")
+            verifyGuest(
+                proot,
+                "git config --global --add safe.directory /opt/flutter 2>/dev/null || true && " +
+                    "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && " +
+                    "ln -sf /opt/flutter/bin/dart /usr/local/bin/dart",
+                "Failed to link Flutter CLI",
+            )
         }
-        verifyGuest(proot, "flutter --version || dart --version", "Flutter & Dart tools could not be verified")
+
+        runCatching {
+            verifyGuest(
+                proot,
+                "git config --global --add safe.directory /opt/flutter 2>/dev/null || true && " +
+                    "cd /opt/flutter && test \"$(git rev-parse HEAD)\" = \"$FLUTTER_COMMIT_SHA\" && " +
+                    "flutter --version && dart --version",
+                "Flutter & Dart tools could not be verified",
+            )
+        }.onSuccess {
+            flutterMarker.parentFile?.mkdirs()
+            flutterMarker.writeText(FLUTTER_VERSION)
+        }.onFailure { error ->
+            // Repair incomplete or corrupted checkout so subsequent retries perform a fresh clone
+            removePath(flutterDir)
+            flutterMarker.delete()
+            throw error
+        }
     }
 
     private suspend fun installAndroidToolchain(
@@ -1159,8 +1200,13 @@ class RuntimeInstaller(private val context: Context) {
                 File(rootfs, "root/.gradle/init.d/pocketdev-android.gradle").isFile
         }
         if (stack == DevStack.FLUTTER) {
-            return File(rootfs, "opt/flutter/bin/flutter").isFile &&
-                File(rootfs, "opt/flutter/bin/flutter").canExecute()
+            val flutterDir = File(rootfs, "opt/flutter")
+            val flutterBin = File(flutterDir, "bin/flutter")
+            val dartBin = File(flutterDir, "bin/dart")
+            return (flutterMarker.readTextOrNull() == FLUTTER_VERSION || File(flutterDir, "packages/flutter/pubspec.yaml").isFile) &&
+                flutterBin.isFile &&
+                dartBin.isFile &&
+                flutterBin.canExecute()
         }
         return true
     }
@@ -1891,6 +1937,9 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         private const val GITHUB_CLI_VERSION = "2.100.0"
         private const val GITHUB_CLI_RELEASE_URL = "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_arm64.tar.gz"
         private const val GITHUB_CLI_RELEASE_SHA256 = "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961"
+        const val FLUTTER_VERSION = "3.29.0"
+        private const val FLUTTER_GIT_REPO = "https://github.com/flutter/flutter.git"
+        private const val FLUTTER_COMMIT_SHA = "35c388afb57ef061d06a39b537336c87e0e3d1b1"
         private const val LEGACY_README = "# Pocket Dev project\n\nThis project is managed locally on Android.\n"
         private const val LEGACY_INDEX = "<!doctype html><title>Pocket Dev</title><h1>Hello from Android</h1>\n"
         private const val ROOTFS_VERSION = "ubuntu-20.04.5-arm64"

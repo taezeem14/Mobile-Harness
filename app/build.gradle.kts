@@ -77,15 +77,39 @@ android {
             ?: providers.environmentVariable("ANDROID_HOME").orNull
             ?: providers.environmentVariable("ANDROID_SDK_ROOT").orNull
             ?: osDefaultSdk
-        val ndkFolder = listOf(File(sdkRoot, "ndk"), File(sdkRoot, "ndk-bundle")).firstOrNull { it.isDirectory }
-        val localNdks: List<String> = if (ndkFolder != null && ndkFolder.isDirectory) {
-            ndkFolder.listFiles()?.filter { f -> f.isDirectory }?.map { f -> f.name } ?: emptyList<String>()
-        } else {
-            emptyList<String>()
+        val versionRegex = Regex("""^\d+(\.\d+)+.*$""")
+        fun parseNdkRevision(sourceProps: File): String? {
+            if (!sourceProps.isFile) return null
+            return runCatching {
+                Properties().apply {
+                    sourceProps.inputStream().use(::load)
+                }.getProperty("Pkg.Revision")?.trim()
+            }.getOrNull()
         }
+
+        val discoveredNdks = mutableListOf<String>()
+        val ndkDir = File(sdkRoot, "ndk")
+        if (ndkDir.isDirectory) {
+            ndkDir.listFiles()?.filter { it.isDirectory }?.forEach { sub ->
+                val revision = parseNdkRevision(File(sub, "source.properties"))
+                    ?: sub.name.takeIf { it.matches(versionRegex) }
+                if (!revision.isNullOrBlank() && revision.matches(versionRegex)) {
+                    discoveredNdks.add(revision)
+                }
+            }
+        }
+
+        val ndkBundleDir = File(sdkRoot, "ndk-bundle")
+        if (ndkBundleDir.isDirectory) {
+            val bundleRevision = parseNdkRevision(File(ndkBundleDir, "source.properties"))
+            if (!bundleRevision.isNullOrBlank() && bundleRevision.matches(versionRegex)) {
+                discoveredNdks.add(bundleRevision)
+            }
+        }
+
         ndkVersion = when {
-            "26.1.10909125" in localNdks -> "26.1.10909125"
-            localNdks.isNotEmpty() -> localNdks.sorted().last()
+            "26.1.10909125" in discoveredNdks -> "26.1.10909125"
+            discoveredNdks.isNotEmpty() -> discoveredNdks.sorted().last()
             else -> "26.1.10909125"
         }
     }
