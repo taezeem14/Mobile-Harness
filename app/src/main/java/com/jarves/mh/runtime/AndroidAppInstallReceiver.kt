@@ -6,14 +6,14 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
 import android.widget.Toast
+import androidx.core.content.IntentCompat
 
 class AndroidAppInstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != AndroidAppInstaller.ACTION_INSTALL_RESULT) return
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
-            @Suppress("DEPRECATION")
-            val userAction = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+            val userAction = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_INTENT, Intent::class.java)
             userAction?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             userAction?.let(context::startActivity)
             return

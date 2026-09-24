@@ -8,12 +8,14 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
 import android.net.Uri
+import android.net.http.SslError
 import android.provider.Settings
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
+import android.webkit.SslErrorHandler
 import android.widget.Toast
 import com.jarves.mh.BuildConfig
 import androidx.activity.compose.BackHandler
@@ -493,6 +495,9 @@ private fun BackgroundTaskSetupScreen(
     fun batteryUnrestricted(): Boolean = powerManager.isIgnoringBatteryOptimizations(context.packageName)
 
     var currentStep by rememberSaveable { mutableIntStateOf(0) }
+    BackHandler(enabled = currentStep > 0) {
+        currentStep--
+    }
     var notificationGranted by remember { mutableStateOf(notificationsAllowed()) }
     var batteryGranted by remember { mutableStateOf(batteryUnrestricted()) }
     var notificationDenied by rememberSaveable { mutableStateOf(false) }
@@ -3746,15 +3751,16 @@ private fun ReadOnlyProjectScreen(
     onSwitchChat: (String) -> Unit,
     onContinueHere: () -> Unit,
 ) {
-    BackHandler(onBack = onBack)
-    val project = state.readOnlyProject ?: return
-    val activeChat = state.readOnlyProjectChats.firstOrNull { it.id == state.readOnlyChatId }
     val listState = rememberLazyListState()
     var showChats by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(state.readOnlyChatId) {
         if (state.readOnlyMessages.isNotEmpty()) listState.scrollToItem(state.readOnlyMessages.lastIndex)
     }
+
+    BackHandler(onBack = onBack)
+    val project = state.readOnlyProject ?: return
+    val activeChat = state.readOnlyProjectChats.firstOrNull { it.id == state.readOnlyChatId }
 
     if (showChats) {
         ChatSwitcherDialog(
@@ -3856,7 +3862,17 @@ private fun WorkspaceScreen(
     onOpenAttachment: (ChatAttachment) -> Unit,
     onBuildAndRunAndroid: () -> Unit,
 ) {
-    BackHandler(onBack = onBack)
+    var selectedTab by rememberSaveable { mutableStateOf(WorkspaceTab.CHAT) }
+    var previewWebView by remember { mutableStateOf<WebView?>(null) }
+    BackHandler {
+        if (selectedTab == WorkspaceTab.PREVIEW && previewWebView?.canGoBack() == true) {
+            previewWebView?.goBack()
+        } else if (selectedTab != WorkspaceTab.CHAT) {
+            selectedTab = WorkspaceTab.CHAT
+        } else {
+            onBack()
+        }
+    }
     val context = LocalContext.current
     val isAndroidProject = state.androidProjectDetected
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -3918,7 +3934,6 @@ private fun WorkspaceScreen(
         }
     }
 
-    var selectedTab by rememberSaveable { mutableStateOf(WorkspaceTab.CHAT) }
     var showChats by rememberSaveable { mutableStateOf(false) }
     val activeChat = state.projectChats.firstOrNull { it.id == state.activeChatId }
 
@@ -4122,7 +4137,11 @@ private fun WorkspaceScreen(
                     onUndoFileChange,
                     onKeepFileChange,
                 )
-                WorkspaceTab.PREVIEW -> PreviewTab(state.previewReady, state.previewUrl)
+                WorkspaceTab.PREVIEW -> PreviewTab(
+                    ready = state.previewReady,
+                    url = state.previewUrl,
+                    onWebViewCreated = { previewWebView = it },
+                )
             }
         }
     }
@@ -4713,7 +4732,9 @@ private fun LiveClaudeProcess(
     finishedAtMillis: Long?,
     thinkingActive: Boolean,
 ) {
-    val elapsedSeconds = startedAtMillis?.let { rememberLiveElapsedSeconds(it).toLong() } ?: 0L
+    val elapsedSeconds = startedAtMillis?.let {
+        rememberLiveElapsedSeconds(it, isRunning = isRunning, finishedAtMillis = finishedAtMillis).toLong()
+    } ?: 0L
     ClaudeActivityDisclosure(
         items = processItems,
         headline = activityHeadline(processItems, elapsedSeconds, thinkingActive),
@@ -5021,11 +5042,17 @@ private fun completedProcessSummary(
 }
 
 @Composable
-private fun rememberLiveElapsedSeconds(startedAtMillis: Long): Int {
-    var seconds by remember(startedAtMillis) {
-        mutableIntStateOf(((System.currentTimeMillis() - startedAtMillis) / 1000L).toInt().coerceAtLeast(0))
+private fun rememberLiveElapsedSeconds(
+    startedAtMillis: Long,
+    isRunning: Boolean = true,
+    finishedAtMillis: Long? = null,
+): Int {
+    val endMillis = finishedAtMillis ?: System.currentTimeMillis()
+    var seconds by remember(startedAtMillis, isRunning, finishedAtMillis) {
+        mutableIntStateOf(((endMillis - startedAtMillis) / 1000L).toInt().coerceAtLeast(0))
     }
-    LaunchedEffect(startedAtMillis) {
+    LaunchedEffect(startedAtMillis, isRunning, finishedAtMillis) {
+        if (!isRunning || finishedAtMillis != null) return@LaunchedEffect
         while (true) {
             delay(1_000)
             seconds = ((System.currentTimeMillis() - startedAtMillis) / 1000L).toInt().coerceAtLeast(0)
@@ -5302,12 +5329,31 @@ private fun DiffLineRow(line: DiffLine) {
 }
 
 @Composable
-private fun PreviewTab(ready: Boolean, url: String?) {
+private fun PreviewTab(
+    ready: Boolean,
+    url: String?,
+    onWebViewCreated: ((WebView?) -> Unit)? = null,
+) {
     var address by rememberSaveable(url) { mutableStateOf(if (ready) url.orEmpty() else "") }
     var activeUrl by rememberSaveable(url) { mutableStateOf(if (ready) url else null) }
     var addressError by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var loadedTargetUrl by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webView?.apply {
+                stopLoading()
+                loadUrl("about:blank")
+                clearHistory()
+                removeAllViews()
+                destroy()
+            }
+            webView = null
+            onWebViewCreated?.invoke(null)
+        }
+    }
 
     val navigate = {
         val normalized = normalizePreviewUrl(address)
@@ -5386,6 +5432,16 @@ private fun PreviewTab(ready: Boolean, url: String?) {
             }
         }
         val targetUrl = activeUrl
+        LaunchedEffect(targetUrl, webView) {
+            val target = targetUrl ?: return@LaunchedEffect
+            val wv = webView ?: return@LaunchedEffect
+            val currentNorm = wv.url?.trimEnd('/')
+            val targetNorm = target.trimEnd('/')
+            if (loadedTargetUrl?.trimEnd('/') != targetNorm || (currentNorm != null && currentNorm != targetNorm)) {
+                loadedTargetUrl = target
+                wv.loadUrl(target)
+            }
+        }
         if (targetUrl == null) {
             EmptyState(Icons.Default.PlayArrow, "Preview not running", "Enter a localhost URL above, or start a local web server in the project Terminal.")
         } else {
@@ -5393,6 +5449,7 @@ private fun PreviewTab(ready: Boolean, url: String?) {
                 factory = { context ->
                     WebView(context).apply {
                         webView = this
+                        onWebViewCreated?.invoke(this)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         webChromeClient = object : WebChromeClient() {
@@ -5413,15 +5470,27 @@ private fun PreviewTab(ready: Boolean, url: String?) {
 
                             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                                 val target = request?.url ?: return blockedPreviewResponse()
-                                return if (target.isLoopbackPreviewUrl()) null else blockedPreviewResponse()
+                                if (target.isLoopbackPreviewUrl()) return null
+                                if (!request.isForMainFrame && request.method.equals("GET", ignoreCase = true)) {
+                                    return null
+                                }
+                                return blockedPreviewResponse()
+                            }
+
+                            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                                val target = error?.url?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                                if (target?.isLoopbackPreviewUrl() == true) {
+                                    handler?.proceed()
+                                } else {
+                                    super.onReceivedSslError(view, handler, error)
+                                }
                             }
                         }
-                        loadUrl(targetUrl)
                     }
                 },
                 update = { current ->
                     webView = current
-                    if (current.url != targetUrl) current.loadUrl(targetUrl)
+                    onWebViewCreated?.invoke(current)
                 },
                 modifier = Modifier.fillMaxSize(),
             )

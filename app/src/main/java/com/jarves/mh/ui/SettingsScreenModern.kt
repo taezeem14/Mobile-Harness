@@ -3,6 +3,7 @@ package com.jarves.mh.ui
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -143,6 +144,10 @@ fun SettingsScreen(
     var terminalCleared by remember { mutableStateOf(false) }
     var showReliabilityHelp by rememberSaveable { mutableStateOf(false) }
     var stackPendingRemoval by remember { mutableStateOf<DevStack?>(null) }
+
+    BackHandler(enabled = expanded != null) {
+        expanded = null
+    }
 
     stackPendingRemoval?.let { stack ->
         AlertDialog(
@@ -899,8 +904,8 @@ private fun DebugUpdateChannelSection(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Button(
-                onClick = { onSave(url) },
-                enabled = url.startsWith("https://"),
+                onClick = { onSave(url.trim()) },
+                enabled = url.trim().startsWith("https://"),
                 modifier = Modifier.weight(1f),
             ) {
                 Text(if (isOverridden) "Replace" else "Use & check")

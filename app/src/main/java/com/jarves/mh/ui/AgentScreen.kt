@@ -69,6 +69,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -175,7 +176,12 @@ fun AgentScreen(
     onSetAntigravityEffort: (String) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
-    var selectedKind by rememberSaveable(state.provider.kind) { mutableStateOf(state.provider.kind) }
+    val visibleKinds = remember(state.agentKind) { providersForAgent(state.agentKind) }
+    var selectedKind by rememberSaveable(state.provider.kind) {
+        mutableStateOf(
+            if (state.provider.kind in visibleKinds) state.provider.kind else visibleKinds.first()
+        )
+    }
     var baseUrl by rememberSaveable(state.provider.baseUrl) { mutableStateOf(state.provider.baseUrl) }
     var model by rememberSaveable(state.provider.model) { mutableStateOf(state.provider.model) }
     var dshApi by rememberSaveable(state.provider.dshApi) { mutableStateOf(state.provider.dshApi) }
@@ -196,6 +202,22 @@ fun AgentScreen(
     var statusProviderMessage by remember { mutableStateOf<String?>(null) }
     var keyConnectionStatuses by remember(selectedKind) {
         mutableStateOf<Map<String, KeyConnectionStatus>>(emptyMap())
+    }
+    LaunchedEffect(state.agentKind) {
+        if (selectedKind !in visibleKinds) {
+            val fallback = providersForAgent(state.agentKind).first()
+            selectedKind = fallback
+            baseUrl = fallback.defaultBaseUrl
+            model = fallback.defaultModel
+            dshApi = defaultDshApiForProvider(fallback)
+            models = emptyList()
+            modelSearch = ""
+            showModels = false
+            newKeyName = ""
+            newApiKey = ""
+            status = null
+            statusProviderMessage = null
+        }
     }
     // Antigravity model sheet state
     var showAntigravityModelSheet by rememberSaveable { mutableStateOf(false) }
@@ -634,7 +656,7 @@ fun AgentScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         if (modelSearch.isNotBlank() && filteredModels.none { it.id.equals(modelSearch.trim(), ignoreCase = true) }) {
-                            item {
+                            item(key = "custom_model_search") {
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
                                     color = PocketOrange.copy(alpha = 0.12f),

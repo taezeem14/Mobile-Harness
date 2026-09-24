@@ -208,14 +208,16 @@ class DshRuntimeBridge(
         var failure = ""
 
         fun send(method: String, id: Int, params: JSONObject? = null) {
-            val frame = JSONObject()
-                .put("jsonrpc", "2.0")
-                .put("id", id)
-                .put("method", method)
-            if (params != null) frame.put("params", params)
-            writer.write(frame.toString())
-            writer.newLine()
-            writer.flush()
+            runCatching {
+                val frame = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", id)
+                    .put("method", method)
+                if (params != null) frame.put("params", params)
+                writer.write(frame.toString())
+                writer.newLine()
+                writer.flush()
+            }
         }
 
         fun closeInput() {
@@ -518,14 +520,18 @@ class DshRuntimeBridge(
     }
 
     private fun buildContextPrompt(currentPrompt: String, history: List<ChatMessage>, guestWorkspacePath: String, projectKind: ProjectKind): String {
-        val priorMessages = history
+        val filtered = history
             .filter { msg ->
                 (msg.fromUser || !msg.text.startsWith("Hi! Tell me")) &&
                 !msg.text.startsWith("Failed to") &&
                 !msg.text.startsWith("Error:") &&
                 !msg.text.contains("API Error")
             }
-            .dropLast(1)
+        val priorMessages = if (filtered.lastOrNull()?.text == currentPrompt) {
+            filtered.dropLast(1)
+        } else {
+            filtered
+        }
 
         val sb = StringBuilder()
         sb.appendLine("<project_workspace>")
@@ -549,6 +555,8 @@ class DshRuntimeBridge(
         }
         if (installer.isStackInstalled(DevStack.FLUTTER)) {
             sb.appendLine("If this is a Flutter project, Flutter and Dart are installed. You can create projects with `flutter create .` and preview web builds using `flutter run -d web-server --web-port 8080 --web-hostname 127.0.0.1` so the in-app Web Preview can display it.")
+        } else {
+            sb.appendLine("Flutter and Dart are not installed. Do not run or suggest flutter or dart commands.")
         }
         sb.appendLine("For local servers, give a clear start command and never use a kill command that searches its own command text with pgrep, because it can terminate the terminal itself.")
         sb.appendLine("</project_workspace>")

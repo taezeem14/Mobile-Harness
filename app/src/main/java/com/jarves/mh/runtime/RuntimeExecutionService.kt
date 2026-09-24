@@ -5,9 +5,12 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.jarves.mh.MainActivity
 import com.jarves.mh.R
 
@@ -37,6 +40,7 @@ class RuntimeExecutionService : Service() {
         if (intent?.hasExtra(EXTRA_CAN_STOP) == true) canStop = intent.getBooleanExtra(EXTRA_CAN_STOP, true)
         when (intent?.action ?: ACTION_START) {
             ACTION_STOP -> {
+                releaseWakeLock()
                 RuntimeTaskController.requestStop()
                 getSystemService(NotificationManager::class.java).notify(
                     RUNNING_NOTIFICATION_ID,
@@ -71,9 +75,16 @@ class RuntimeExecutionService : Service() {
             }
             else -> {
                 taskRunning = true
-                startForeground(
+                val foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                } else {
+                    0
+                }
+                ServiceCompat.startForeground(
+                    this,
                     RUNNING_NOTIFICATION_ID,
                     runningNotification("Claude Code is working in $projectName", includeStop = canStop),
+                    foregroundServiceType,
                 )
                 acquireWakeLock()
             }

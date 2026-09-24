@@ -66,7 +66,7 @@ class AppPreferences(private val context: Context) {
         val key = agentConversationKey(agent, projectId, chatId)
         preferences.edit().apply {
             if (conversationId.isNullOrBlank()) remove(key) else putString(key, conversationId)
-        }.commit()
+        }.apply()
     }
 
     fun loadAgentConversation(agent: AgentKind, projectId: String, chatId: String): String? =
@@ -292,8 +292,18 @@ class AppPreferences(private val context: Context) {
 
     private val chatsDir = File(context.filesDir, "chats").also { it.mkdirs() }
 
+    private fun sanitizeChatSegment(value: String): String {
+        var sanitized = value.replace("/", "").replace("\\", "")
+        while (sanitized.contains("..")) {
+            sanitized = sanitized.replace("..", "")
+        }
+        return sanitized.trim()
+    }
+
     fun saveProjectChats(projectId: String, chats: List<ProjectChat>) {
-        val projectDir = File(chatsDir, projectId).also { it.mkdirs() }
+        val safeProjectId = sanitizeChatSegment(projectId)
+        if (safeProjectId.isBlank()) return
+        val projectDir = File(chatsDir, safeProjectId).also { it.mkdirs() }
         val arr = JSONArray()
         chats.forEach { chat ->
             arr.put(JSONObject().apply {
@@ -303,11 +313,19 @@ class AppPreferences(private val context: Context) {
                 put("updatedAtMillis", chat.updatedAtMillis)
             })
         }
-        File(projectDir, "index.json").writeText(arr.toString())
+        val destination = File(projectDir, "index.json")
+        val temporary = File(projectDir, ".index.json.tmp")
+        temporary.writeText(arr.toString())
+        if (!temporary.renameTo(destination)) {
+            temporary.copyTo(destination, overwrite = true)
+            temporary.delete()
+        }
     }
 
     fun loadProjectChats(projectId: String): List<ProjectChat> {
-        val projectDir = File(chatsDir, projectId).also { it.mkdirs() }
+        val safeProjectId = sanitizeChatSegment(projectId)
+        if (safeProjectId.isBlank()) return emptyList()
+        val projectDir = File(chatsDir, safeProjectId).also { it.mkdirs() }
         val index = File(projectDir, "index.json")
         if (index.exists()) {
             return runCatching {
@@ -325,7 +343,7 @@ class AppPreferences(private val context: Context) {
         }
 
         // Migrate the original one-file-per-project conversation without losing it.
-        val legacy = File(chatsDir, "$projectId.json")
+        val legacy = File(chatsDir, "$safeProjectId.json")
         val legacyMessages = loadLegacyMessages(legacy)
         val now = System.currentTimeMillis()
         val chat = ProjectChat(
@@ -334,13 +352,16 @@ class AppPreferences(private val context: Context) {
             createdAtMillis = now,
             updatedAtMillis = now,
         )
-        saveProjectChats(projectId, listOf(chat))
-        if (legacyMessages.isNotEmpty()) saveMessages(projectId, chat.id, legacyMessages)
+        saveProjectChats(safeProjectId, listOf(chat))
+        if (legacyMessages.isNotEmpty()) saveMessages(safeProjectId, chat.id, legacyMessages)
         return listOf(chat)
     }
 
     @Synchronized
     fun saveMessages(projectId: String, chatId: String, messages: List<ChatMessage>) {
+        val safeProjectId = sanitizeChatSegment(projectId)
+        val safeChatId = sanitizeChatSegment(chatId)
+        if (safeProjectId.isBlank() || safeChatId.isBlank()) return
         val arr = JSONArray()
         messages.forEach { m ->
             arr.put(JSONObject().apply {
@@ -372,9 +393,9 @@ class AppPreferences(private val context: Context) {
                 })
             })
         }
-        val projectDir = File(chatsDir, projectId).also { it.mkdirs() }
-        val destination = File(projectDir, "$chatId.json")
-        val temporary = File(projectDir, ".$chatId.json.tmp")
+        val projectDir = File(chatsDir, safeProjectId).also { it.mkdirs() }
+        val destination = File(projectDir, "$safeChatId.json")
+        val temporary = File(projectDir, ".$safeChatId.json.tmp")
         temporary.writeText(arr.toString())
         if (!temporary.renameTo(destination)) {
             temporary.copyTo(destination, overwrite = true)
@@ -383,13 +404,18 @@ class AppPreferences(private val context: Context) {
     }
 
     fun loadMessages(projectId: String, chatId: String): List<ChatMessage> {
-        val file = File(File(chatsDir, projectId), "$chatId.json")
+        val safeProjectId = sanitizeChatSegment(projectId)
+        val safeChatId = sanitizeChatSegment(chatId)
+        if (safeProjectId.isBlank() || safeChatId.isBlank()) return emptyList()
+        val file = File(File(chatsDir, safeProjectId), "$safeChatId.json")
         return loadLegacyMessages(file)
     }
 
     fun deleteProjectChats(projectId: String) {
-        File(chatsDir, projectId).deleteRecursively()
-        File(chatsDir, "$projectId.json").delete()
+        val safeProjectId = sanitizeChatSegment(projectId)
+        if (safeProjectId.isBlank()) return
+        File(chatsDir, safeProjectId).deleteRecursively()
+        File(chatsDir, "$safeProjectId.json").delete()
     }
 
     private fun loadLegacyMessages(file: File): List<ChatMessage> {

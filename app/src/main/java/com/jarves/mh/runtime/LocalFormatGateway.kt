@@ -4,6 +4,7 @@ import com.jarves.mh.model.ProviderProfile
 import android.util.Log
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -19,6 +20,7 @@ internal class LocalFormatGateway(
     private val profile: ProviderProfile,
     private val apiKey: String,
 ) : AutoCloseable {
+    val sessionToken: String = UUID.randomUUID().toString()
     private val running = AtomicBoolean(true)
     private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
     val url: String = "http://127.0.0.1:${server.localPort}"
@@ -37,6 +39,7 @@ internal class LocalFormatGateway(
 
     private fun handle(socket: Socket) {
         val input = BufferedInputStream(socket.getInputStream())
+        val output = BufferedOutputStream(socket.getOutputStream())
         val requestLine = readLine(input) ?: return
         val headers = mutableMapOf<String, String>()
         while (true) {
@@ -45,7 +48,43 @@ internal class LocalFormatGateway(
             val split = line.indexOf(':')
             if (split > 0) headers[line.substring(0, split).lowercase()] = line.substring(split + 1).trim()
         }
-        val length = headers["content-length"]?.toIntOrNull() ?: 0
+
+        val requestTarget = requestLine.split(' ').getOrNull(1).orEmpty()
+        val query = requestTarget.substringAfter('?', "")
+        val queryParams = if (query.isNotEmpty()) {
+            query.split('&').map { param ->
+                val parts = param.split('=', limit = 2)
+                if (parts.size == 2) parts[0] to parts[1] else parts[0] to ""
+            }
+        } else emptyList()
+
+        val authHeader = headers["authorization"]?.trim().orEmpty()
+        val isAuthorized = authHeader.equals("Bearer $sessionToken", ignoreCase = true) ||
+            authHeader == sessionToken ||
+            queryParams.any { (k, v) -> v == sessionToken || k == sessionToken } ||
+            (apiKey.isNotBlank() && (
+                authHeader.equals("Bearer $apiKey", ignoreCase = true) ||
+                authHeader == apiKey ||
+                headers["x-api-key"]?.trim() == apiKey ||
+                queryParams.any { (k, v) -> v == apiKey || k == apiKey }
+            ))
+
+        if (!isAuthorized) {
+            writeJson(output, 401, errorJson("unauthorized", "Unauthorized"))
+            return
+        }
+
+        val contentLengthRaw = headers["content-length"]
+        val length = contentLengthRaw?.toIntOrNull() ?: 0
+        if (contentLengthRaw != null && contentLengthRaw.toIntOrNull() == null) {
+            writeJson(output, 400, errorJson("invalid_request", "Invalid Content-Length"))
+            return
+        }
+        if (length < 0 || length > 10 * 1024 * 1024) {
+            writeJson(output, if (length < 0) 400 else 413, errorJson("invalid_request", "Content-Length out of bounds"))
+            return
+        }
+
         val bodyBytes = ByteArray(length)
         var offset = 0
         while (offset < length) {
@@ -53,8 +92,7 @@ internal class LocalFormatGateway(
             if (count < 0) break
             offset += count
         }
-        val path = requestLine.split(' ').getOrNull(1).orEmpty().substringBefore('?')
-        val output = BufferedOutputStream(socket.getOutputStream())
+        val path = requestTarget.substringBefore('?')
         if (path.endsWith("/count_tokens")) {
             val approximate = bodyBytes.decodeToString().length / 4 + 1
             writeJson(output, 200, JSONObject().put("input_tokens", approximate).toString())
@@ -205,19 +243,30 @@ internal class LocalFormatGateway(
 
     private fun writeJson(output: BufferedOutputStream, code: Int, body: String) {
         val bytes = body.toByteArray()
-        val reason = if (code in 200..299) "OK" else "Error"
+        val reason = when (code) {
+            200 -> "OK"
+            400 -> "Bad Request"
+            401 -> "Unauthorized"
+            404 -> "Not Found"
+            413 -> "Payload Too Large"
+            502 -> "Bad Gateway"
+            in 200..299 -> "OK"
+            else -> "Error"
+        }
         output.write("HTTP/1.1 $code $reason\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
         output.write(bytes)
         output.flush()
     }
 
     private fun readLine(input: BufferedInputStream): String? {
-        val bytes = ArrayList<Byte>()
+        val maxBytes = 16 * 1024
+        val bytes = ByteArrayOutputStream()
         while (true) {
             val value = input.read()
-            if (value < 0) return if (bytes.isEmpty()) null else bytes.toByteArray().decodeToString()
-            if (value == '\n'.code) return bytes.toByteArray().decodeToString().trimEnd('\r')
-            bytes += value.toByte()
+            if (value < 0) return if (bytes.size() == 0) null else bytes.toString(Charsets.UTF_8.name())
+            if (value == '\n'.code) return bytes.toString(Charsets.UTF_8.name()).trimEnd('\r')
+            if (bytes.size() >= maxBytes) return null
+            bytes.write(value)
         }
     }
 

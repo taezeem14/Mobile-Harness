@@ -111,9 +111,9 @@ fun TerminalScreen(
     showQuickCommands: Boolean = true,
     compactHeader: Boolean = false,
 ) {
-    var commandInput by remember { mutableStateOf(TextFieldValue()) }
-    var commandHistory by remember { mutableStateOf(emptyList<String>()) }
-    var historyIndex by remember { mutableStateOf(-1) }
+    var commandInput by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue()) }
+    var commandHistory by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var historyIndex by rememberSaveable { mutableStateOf(-1) }
     var altActive by rememberSaveable { mutableStateOf(false) }
     var ctrlActive by rememberSaveable { mutableStateOf(false) }
     val terminalScrollState = rememberScrollState()
@@ -396,10 +396,9 @@ fun TerminalScreen(
                             value = commandInput,
                             onValueChange = { next ->
                                 if (ctrlActive && next.text.length > commandInput.text.length) {
-                                    val inserted = next.text.substring(
-                                        commandInput.selection.start.coerceAtMost(next.text.length),
-                                        next.selection.end.coerceAtMost(next.text.length),
-                                    )
+                                    val start = commandInput.selection.min.coerceIn(0, next.text.length)
+                                    val end = maxOf(commandInput.selection.max, next.selection.max).coerceIn(start, next.text.length)
+                                    val inserted = next.text.substring(start, end)
                                     if (inserted.any { it.equals('c', ignoreCase = true) }) {
                                         if (isRunning) {
                                             onInterrupt?.invoke()

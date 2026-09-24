@@ -74,10 +74,12 @@ class GitHubClient {
         val result = LinkedHashMap<String, GitHubRepository>()
         var page = 1
         while (page <= 10) {
-            val array = getJson(
+            val response = getJson(
                 "https://api.github.com/user/repos?visibility=all&affiliation=owner,collaborator,organization_member&sort=updated&per_page=100&page=$page",
                 token,
-            ) as JSONArray
+            )
+            if (response !is JSONArray) break
+            val array = response
             for (index in 0 until array.length()) {
                 val item = array.getJSONObject(index)
                 val repo = GitHubRepository(
@@ -109,8 +111,12 @@ class GitHubClient {
             setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             setRequestProperty("User-Agent", "PocketDev-Android")
         }
-        connection.outputStream.use { it.write(body) }
-        return readResponse(connection) as JSONObject
+        return try {
+            connection.outputStream.use { it.write(body) }
+            readResponse(connection) as JSONObject
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun getJson(endpoint: String, token: String): Any {
@@ -120,20 +126,34 @@ class GitHubClient {
             readTimeout = 30_000
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("Authorization", "Bearer $token")
-            setRequestProperty("X-GitHub-Api-Version", "2026-03-10")
+            setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
             setRequestProperty("User-Agent", "PocketDev-Android")
         }
-        return readResponse(connection)
+        return try {
+            readResponse(connection)
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun readResponse(connection: HttpURLConnection): Any {
-        val status = connection.responseCode
-        val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
-            ?.bufferedReader()?.use { it.readText() }.orEmpty()
-        if (status !in 200..299) {
-            val message = runCatching { JSONObject(text).optString("message") }.getOrNull()
-            error(message?.takeIf(String::isNotBlank) ?: "GitHub returned HTTP $status")
+        return try {
+            val status = connection.responseCode
+            val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (status !in 200..299) {
+                val message = runCatching {
+                    if (text.isNotBlank()) JSONObject(text).optString("message") else null
+                }.getOrNull()
+                error(message?.takeIf(String::isNotBlank) ?: "GitHub returned HTTP $status")
+            }
+            if (text.isNotBlank()) {
+                if (text.trimStart().startsWith("[")) JSONArray(text) else JSONObject(text)
+            } else {
+                JSONObject()
+            }
+        } finally {
+            connection.disconnect()
         }
-        return if (text.trimStart().startsWith("[")) JSONArray(text) else JSONObject(text)
     }
 }

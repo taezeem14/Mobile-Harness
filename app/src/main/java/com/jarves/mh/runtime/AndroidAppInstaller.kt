@@ -45,7 +45,7 @@ object AndroidAppInstaller {
         try {
             installer.openSession(sessionId).use { session ->
                 apk.inputStream().use { input ->
-                    session.openWrite(apk.name, 0, apk.length()).use { output ->
+                    session.openWrite("base.apk", 0, apk.length()).use { output ->
                         input.copyTo(output)
                         session.fsync(output)
                     }

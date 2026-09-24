@@ -276,7 +276,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var githubAuthProcess: Process? = null
     private var githubAuthJob: kotlinx.coroutines.Job? = null
     @Volatile private var lastOpenedAntigravityAuthUrl: String? = null
-    private var activeRuntimeRequest: RuntimeRetryRequest? = null
+    private val runtimeRequestLock = Any()
+    @Volatile private var activeRuntimeRequest: RuntimeRetryRequest? = null
     private val failedApiKeyIds = mutableSetOf<String>()
     private val transcriptWrites = Channel<TranscriptWrite>(Channel.UNLIMITED)
     private val initialAgentKind = AgentKind.fromStored(preferences.agentKind)
@@ -328,7 +329,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         RuntimeSetupController.restore(application)
         viewModelScope.launch(Dispatchers.IO) {
             for (write in transcriptWrites) {
-                preferences.saveMessages(write.projectId, write.chatId, write.messages)
+                try {
+                    preferences.saveMessages(write.projectId, write.chatId, write.messages)
+                } catch (_: Throwable) {
+                }
             }
         }
         viewModelScope.launch { dshRuntime.events.collect(::onRuntimeEvent) }
@@ -454,39 +458,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     terminalProcess = proc
                     val native = proc as? NativeSpawnProcess
-                    var offset = 0L
-                    val streamed = StringBuilder()
-                    var autoConfirmed = false
-                    while (proc.isAlive || (native?.outputFile?.length() ?: 0L) > offset) {
-                        val file = native?.outputFile
-                        val available = (file?.length() ?: 0L) - offset
-                        if (file == null || available <= 0) {
-                            Thread.sleep(50)
-                            continue
-                        }
-                        val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-                        val count = RandomAccessFile(file, "r").use { input ->
-                            input.seek(offset)
-                            input.read(bytes)
-                        }
-                        if (count > 0) {
-                            offset += count
-                            streamed.append(bytes.decodeToString(0, count))
-                            _terminalLiveOutput.value = sanitizeTerminalOutput(streamed.toString())
-                                .trimEnd()
-                                .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-                            if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, streamed.toString())) {
-                                proc.outputStream.write("y\n".toByteArray())
-                                proc.outputStream.flush()
-                                autoConfirmed = true
+                    try {
+                        var offset = 0L
+                        val streamed = StringBuilder()
+                        var autoConfirmed = false
+                        while (proc.isAlive || (native?.outputFile?.length() ?: 0L) > offset) {
+                            val file = native?.outputFile
+                            val available = (file?.length() ?: 0L) - offset
+                            if (file == null || available <= 0) {
+                                Thread.sleep(50)
+                                continue
+                            }
+                            val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
+                            val count = RandomAccessFile(file, "r").use { input ->
+                                input.seek(offset)
+                                input.read(bytes)
+                            }
+                            if (count > 0) {
+                                offset += count
+                                streamed.append(bytes.decodeToString(0, count))
+                                _terminalLiveOutput.value = sanitizeTerminalOutput(streamed.toString())
+                                    .trimEnd()
+                                    .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+                                if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, streamed.toString())) {
+                                    proc.outputStream.write("y\n".toByteArray())
+                                    proc.outputStream.flush()
+                                    autoConfirmed = true
+                                }
                             }
                         }
+                        val exit = proc.waitFor()
+                        runCatching { proc.outputStream.close() }
+                        val out = sanitizeTerminalOutput(streamed.toString()).trim()
+                        val finalOut = if (out.isNotEmpty() || exit == 0) out else "Process exited with code $exit"
+                        finalOut to exit
+                    } finally {
+                        native?.outputFile?.delete()
                     }
-                    val exit = proc.waitFor()
-                    runCatching { proc.outputStream.close() }
-                    val out = sanitizeTerminalOutput(streamed.toString()).trim()
-                    val finalOut = if (out.isNotEmpty() || exit == 0) out else "Process exited with code $exit"
-                    finalOut to exit
                 }.getOrElse { "Error: ${it.message}" to 1 }
             }
             _terminalLines.update { it + TerminalOutputLine(command = command, output = output, exitCode = exitCode) }
@@ -599,16 +607,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             val updatedLines = (existingLines + completedLine).takeLast(MAX_PROJECT_TERMINAL_HISTORY)
             saveProjectTerminal(project.id, result.cwd, updatedLines)
-            if (_state.value.activeProject?.id == project.id) {
-                _state.update {
-                    it.copy(
+            _state.update { current ->
+                if (current.activeProject?.id == project.id) {
+                    current.copy(
                         projectTerminalLines = updatedLines,
                         projectTerminalLiveOutput = "",
                         projectTerminalRunning = false,
                         projectTerminalCwd = result.cwd,
                         projectTerminalCommand = null,
+                        previewReady = false,
+                        previewUrl = null,
+                    )
+                } else {
+                    current.copy(
+                        projectTerminalRunning = false,
+                        previewReady = false,
+                        previewUrl = null,
                     )
                 }
+            }
+            if (_state.value.activeProject?.id == project.id) {
                 refreshProjectFiles()
             }
             projectTerminalProcess = null
@@ -620,6 +638,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopProjectTerminalCommand() {
         if (!_state.value.projectTerminalRunning) return
         projectTerminalStopRequested = true
+        _state.update { it.copy(previewReady = false, previewUrl = null) }
         viewModelScope.launch(Dispatchers.IO) {
             projectTerminalProcess?.destroy()
             delay(400)
@@ -672,59 +691,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (projectTerminalStopRequested) process.destroy()
         val native = process as? NativeSpawnProcess
             ?: return ProjectTerminalResult("Unsupported terminal process.", 1, cwd)
-        var offset = 0L
-        val output = StringBuilder()
-        var autoConfirmed = false
-        while (process.isAlive || native.outputFile.length() > offset) {
-            val available = native.outputFile.length() - offset
-            if (available <= 0) {
-                Thread.sleep(50)
-                continue
-            }
-            val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-            val count = RandomAccessFile(native.outputFile, "r").use { file ->
-                file.seek(offset)
-                file.read(bytes)
-            }
-            if (count > 0) {
-                offset += count
-                output.append(bytes.decodeToString(0, count))
-                val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
-                    .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-                if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
-                    process.outputStream.write("y\n".toByteArray())
-                    process.outputStream.flush()
-                    autoConfirmed = true
+        try {
+            var offset = 0L
+            val output = StringBuilder()
+            var autoConfirmed = false
+            while (process.isAlive || native.outputFile.length() > offset) {
+                val available = native.outputFile.length() - offset
+                if (available <= 0) {
+                    Thread.sleep(50)
+                    continue
                 }
-                val detectedPreviewUrl = detectPreviewUrl(visible)
-                _state.update { current ->
-                    if (current.activeProject?.id == projectId) {
-                        current.copy(
-                            projectTerminalLiveOutput = visible,
-                            previewReady = current.previewReady || detectedPreviewUrl != null,
-                            previewUrl = detectedPreviewUrl ?: current.previewUrl,
-                        )
-                    } else current
+                val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
+                val count = RandomAccessFile(native.outputFile, "r").use { file ->
+                    file.seek(offset)
+                    file.read(bytes)
+                }
+                if (count > 0) {
+                    offset += count
+                    output.append(bytes.decodeToString(0, count))
+                    val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
+                        .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+                    if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
+                        process.outputStream.write("y\n".toByteArray())
+                        process.outputStream.flush()
+                        autoConfirmed = true
+                    }
+                    val detectedPreviewUrl = detectPreviewUrl(visible, command)
+                    _state.update { current ->
+                        if (current.activeProject?.id == projectId) {
+                            current.copy(
+                                projectTerminalLiveOutput = visible,
+                                previewReady = current.previewReady || detectedPreviewUrl != null,
+                                previewUrl = detectedPreviewUrl ?: current.previewUrl,
+                            )
+                        } else current
+                    }
                 }
             }
+            val exitCode = process.waitFor()
+            runCatching { process.outputStream.close() }
+            val raw = output.toString()
+            val cwdAfter = raw.substringAfter(marker, "")
+                .lineSequence()
+                .firstOrNull()
+                ?.trim()
+                ?.takeIf { it == guestWorkspacePath || it.startsWith("$guestWorkspacePath/") }
+                ?: cwd
+            val cleanOutput = sanitizeTerminalOutput(raw.substringBefore(marker))
+                .trim()
+                .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+            return ProjectTerminalResult(cleanOutput, exitCode, cwdAfter)
+        } finally {
+            native.outputFile.delete()
         }
-        val exitCode = process.waitFor()
-        runCatching { process.outputStream.close() }
-        val raw = output.toString()
-        val cwdAfter = raw.substringAfter(marker, "")
-            .lineSequence()
-            .firstOrNull()
-            ?.trim()
-            ?.takeIf { it == guestWorkspacePath || it.startsWith("$guestWorkspacePath/") }
-            ?: cwd
-        val cleanOutput = sanitizeTerminalOutput(raw.substringBefore(marker))
-            .trim()
-            .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-        return ProjectTerminalResult(cleanOutput, exitCode, cwdAfter)
     }
 
     private fun sendProcessInput(process: Process?, text: String) {
-        if (process?.isAlive != true || text.isBlank()) return
+        if (process?.isAlive != true) return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 process.outputStream.write((text + "\n").toByteArray())
@@ -749,8 +772,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun prepareInteractiveShellCommand(command: String): String {
         val normalizedApt = command
-            .replace(Regex("(?<![\\w-])sudo\\s+apt(?:-get)?\\s+"), "apt-get ")
-            .replace(Regex("(?<![\\w-])apt\\s+"), "apt-get ")
+            .replace(Regex("(?<![\\w-])sudo\\s+apt-get\\s+"), "apt-get ")
+            .replace(Regex("(?<![\\w-])sudo\\s+apt\\s+"), "apt ")
+            .replace(
+                Regex("(?<![\\w-])apt\\s+(install|upgrade|full-upgrade|dist-upgrade|remove|autoremove|fix-broken)\\b"),
+                "apt-get $1",
+            )
             .replace(
                 Regex("(?<![\\w-])apt-get\\s+(install|upgrade|full-upgrade|dist-upgrade|remove|autoremove|fix-broken)\\b"),
                 "apt-get -y -o Dpkg::Options::=--force-confold $1",
@@ -773,11 +800,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ).any(normalized::contains) || Regex("(curl|wget).*(\\||>)\\s*(sh|bash)").containsMatchIn(normalized)
     }
 
-    private fun detectPreviewUrl(output: String): String? {
-        val match = Regex("https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0):(\\d{2,5})(?:/[^\\s]*)?")
+    private fun detectPreviewUrl(output: String, command: String? = null): String? {
+        if (!command.isNullOrBlank()) {
+            val explicitPortMatch = Regex("""(?:--web-port|--port)(?:=|\s+)(\d{2,5})\b|-p\s+(\d{2,5})\b""")
+                .find(command)
+            val explicitPort = explicitPortMatch?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toIntOrNull()
+                ?: Regex("""python(?:3)?\s+-m\s+http\.server\s+(\d{2,5})\b""").find(command)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            if (explicitPort != null && explicitPort in 1..65535) {
+                return "http://127.0.0.1:$explicitPort/"
+            }
+        }
+        val match = Regex("""https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})(?:/[^\s]*)?""")
             .findAll(output)
+            .filterNot { m ->
+                val full = m.value
+                val port = m.groupValues[1].toIntOrNull()
+                port == 9101 || full.contains("?uri=") || full.contains("&uri=")
+            }
             .lastOrNull()
-            ?: return null
+            ?: return if (!command.isNullOrBlank()) detectServerUrl(command) else null
         val port = match.groupValues[1].toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
         return "http://127.0.0.1:$port/"
     }
@@ -789,7 +830,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val port = pythonMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: 8000
             return port.takeIf { it in 1..65535 }?.let { "http://127.0.0.1:$it/" }
         }
-        val flutterMatch = Regex("""flutter\s+run\s+.*--web-port(?:=|\s+)(\d{2,5})""")
+        val flutterMatch = Regex("""flutter\s+run\s+(?:.*--web-port(?:=|\s+)(\d{2,5})|.*-d\s+web-server.*)""")
             .find(command)
         if (flutterMatch != null) {
             val port = flutterMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: 8080
@@ -1925,7 +1966,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        if (active != null) {
+        if (active != null && active.kind == ProjectKind.QUICK_PROJECT) {
             val chats = preferences.loadProjectChats(active.id)
             val userMessages = chats.sumOf { preferences.loadMessages(active.id, it.id).count { m -> m.fromUser } }
             val workspaceDir = File(getApplication<Application>().filesDir, "workspaces/${active.id}")
@@ -2832,7 +2873,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.getOrElse { "Could not read file: ${it.message}" }
             }
-            _state.update { it.copy(openedFileContent = content, fileContentLoading = false) }
+            _state.update { current ->
+                if (current.openedFilePath == entry.path) {
+                    current.copy(openedFileContent = content, fileContentLoading = false)
+                } else {
+                    current
+                }
+            }
         }
     }
 
@@ -3059,24 +3106,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("These files were explicitly attached by the user. Inspect them only as needed for the request.")
             appendLine("</attached_files>")
         }
-        failedApiKeyIds.clear()
-        activeRuntimeRequest = RuntimeRetryRequest(
-            runtime = activeRuntime(),
-            project = project,
-            prompt = runtimePrompt,
-            history = history,
-            provider = state.value.provider,
-        )
+        val requestToStart = synchronized(runtimeRequestLock) {
+            failedApiKeyIds.clear()
+            val req = RuntimeRetryRequest(
+                runtime = activeRuntime(),
+                project = project,
+                prompt = runtimePrompt,
+                history = history,
+                provider = state.value.provider,
+            )
+            activeRuntimeRequest = req
+            req
+        }
         viewModelScope.launch {
-            activeRuntimeRequest?.let { request ->
-                request.runtime.startSession(
-                    request.project.id,
-                    request.project.slug,
-                    request.project.kind,
-                    request.prompt,
-                    request.history,
-                    request.provider,
+            try {
+                requestToStart.runtime.startSession(
+                    requestToStart.project.id,
+                    requestToStart.project.slug,
+                    requestToStart.project.kind,
+                    requestToStart.prompt,
+                    requestToStart.history,
+                    requestToStart.provider,
                 )
+            } catch (e: Throwable) {
+                synchronized(runtimeRequestLock) {
+                    activeRuntimeRequest = null
+                    failedApiKeyIds.clear()
+                }
+                _state.update { current ->
+                    current.copy(
+                        isRunning = false,
+                        toastMessage = "Failed to start session: ${e.message ?: e::class.java.simpleName}",
+                    )
+                }
             }
         }
     }
@@ -3432,17 +3494,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         if (event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
-            activeRuntimeRequest = null
-            failedApiKeyIds.clear()
+            synchronized(runtimeRequestLock) {
+                activeRuntimeRequest = null
+                failedApiKeyIds.clear()
+            }
         }
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
             refreshProjectFiles()
         }
-        // Save every visible reasoning/tool transition, not only assistant text and
-        // final results. If Android kills the process, the last displayed timeline
-        // is restored as an interrupted work block rather than disappearing.
-        persistMessages(includeLiveProcess = true)
+        val shouldPersist = when (event) {
+            is RuntimeEvent.ToolStarted,
+            is RuntimeEvent.ToolRequested,
+            is RuntimeEvent.ToolApproved,
+            is RuntimeEvent.ToolRejected,
+            is RuntimeEvent.ToolCompleted,
+            is RuntimeEvent.FilesChanged,
+            is RuntimeEvent.PreviewStarted,
+            is RuntimeEvent.SessionCompleted,
+            is RuntimeEvent.SessionFailed -> true
+            else -> false
+        }
+        if (shouldPersist) {
+            persistMessages(includeLiveProcess = true)
+        }
     }
 
     private fun retryWithNextApiKey(event: RuntimeEvent.SessionFailed): Boolean {
@@ -3450,11 +3525,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (current.agentKind == AgentKind.ANTIGRAVITY) return false
         if (!current.isRunning || current.activeSessionId != event.sessionId) return false
         if (!isApiKeyFailure(event.reason)) return false
-        val request = activeRuntimeRequest ?: return false
-        val credentials = vault.credentials(request.provider.kind.name)
-        val active = credentials.firstOrNull { it.isActive } ?: return false
-        failedApiKeyIds += active.id
-        val next = credentials.firstOrNull { it.id !in failedApiKeyIds } ?: return false
+        val retryData = synchronized(runtimeRequestLock) {
+            val req = activeRuntimeRequest ?: return false
+            val credentials = vault.credentials(req.provider.kind.name)
+            val active = credentials.firstOrNull { it.isActive } ?: return false
+            failedApiKeyIds += active.id
+            val nextCred = credentials.firstOrNull { it.id !in failedApiKeyIds } ?: return false
+            Triple(req, active, nextCred)
+        } ?: return false
+        val (request, active, next) = retryData
         if (!vault.activate(request.provider.kind.name, next.id)) return false
         _state.update {
             it.copy(
@@ -3502,7 +3581,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = current.activeProject ?: return
         val chatId = current.activeChatId ?: return
         val liveItems = if (includeLiveProcess) current.liveProcess.filterNot(::isNoisyRuntimeItem) else emptyList()
-        val messages = if (liveItems.isEmpty() && !current.liveThinking) {
+        val messages = if (current.isRunning || (liveItems.isEmpty() && !current.liveThinking)) {
             current.messages
         } else {
             val startedAt = current.workSegmentStartedAtMillis ?: current.taskStartedAtMillis ?: System.currentTimeMillis()

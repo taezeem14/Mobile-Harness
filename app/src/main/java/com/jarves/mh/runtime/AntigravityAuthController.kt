@@ -230,7 +230,13 @@ class AntigravityAuthController(
                 )
             }
         } finally {
-            if (running.isAlive) running.destroy()
+            if (running.isAlive) {
+                running.destroy()
+                runCatching {
+                    if (running.isAlive) running.destroyForcibly()
+                }
+            }
+            runCatching { running.waitFor() }
             runCatching { running.outputStream.close() }
             native.outputFile.delete() // OAuth terminal output is intentionally ephemeral.
             process = null
@@ -255,7 +261,15 @@ class AntigravityAuthController(
     }
 
     suspend fun logout() = withContext(Dispatchers.IO) {
-        process?.destroy()
+        val active = process
+        if (active != null) {
+            active.destroy()
+            runCatching {
+                if (active.isAlive) active.destroyForcibly()
+            }
+            runCatching { active.waitFor() }
+            process = null
+        }
         val previousEmail = mutableState.value.accountEmail
         mutableState.value = AntigravityAuthState(
             status = AntigravityAuthStatus.STARTING,
@@ -284,13 +298,31 @@ class AntigravityAuthController(
             )
             throw error
         } finally {
+            val remaining = process
+            if (remaining != null) {
+                if (remaining.isAlive) {
+                    remaining.destroy()
+                    runCatching {
+                        if (remaining.isAlive) remaining.destroyForcibly()
+                    }
+                }
+                runCatching { remaining.waitFor() }
+            }
             process = null
             logoutOutput.delete()
         }
     }
 
     fun cancel() {
-        process?.destroy()
+        val running = process
+        process = null
+        if (running != null) {
+            running.destroy()
+            runCatching {
+                if (running.isAlive) running.destroyForcibly()
+            }
+            runCatching { running.waitFor() }
+        }
         mutableState.value = AntigravityAuthState(AntigravityAuthStatus.SIGNED_OUT)
     }
 

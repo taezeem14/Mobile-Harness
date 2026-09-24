@@ -21,10 +21,17 @@ internal class NativeSpawnProcess private constructor(
     override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
 
     override fun waitFor(): Int {
-        result?.let { return it }
-        return NativeSpawn.waitFor(pid, false).also {
-            result = it
-            outputPump?.join(1_000)
+        result?.let {
+            runCatching { stdin.close() }
+            return it
+        }
+        return try {
+            NativeSpawn.waitFor(pid, false).also {
+                result = it
+                outputPump?.join(1_000)
+            }
+        } finally {
+            runCatching { stdin.close() }
         }
     }
 
@@ -36,7 +43,9 @@ internal class NativeSpawnProcess private constructor(
     }
 
     override fun destroy() {
+        runCatching { stdin.close() }
         NativeSpawn.kill(pid, 15)
+        NativeSpawn.waitFor(pid, 0).also { result = it }
     }
 
     /** Send the same interrupt signal produced by Ctrl+C in a real terminal. */
@@ -45,7 +54,9 @@ internal class NativeSpawnProcess private constructor(
     }
 
     override fun destroyForcibly(): Process {
+        runCatching { stdin.close() }
         NativeSpawn.kill(pid, 9)
+        NativeSpawn.waitFor(pid, 0).also { result = it }
         return this
     }
 
@@ -108,5 +119,6 @@ private object NativeSpawn {
         ptyColumns: Int,
     ): IntArray
     external fun waitFor(pid: Int, noHang: Boolean): Int
+    fun waitFor(pid: Int, options: Int): Int = waitFor(pid, options != 0)
     external fun kill(pid: Int, signal: Int): Int
 }

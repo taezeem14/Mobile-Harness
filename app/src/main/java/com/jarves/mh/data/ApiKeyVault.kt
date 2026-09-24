@@ -6,8 +6,10 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.util.UUID
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -78,13 +80,15 @@ class ApiKeyVault(context: Context) {
     }
 
     private fun putEncrypted(storageId: String, secret: String) {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val encrypted = cipher.doFinal(secret.toByteArray(Charsets.UTF_8))
-        preferences.edit()
-            .putString("$storageId.iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .putString("$storageId.value", Base64.encodeToString(encrypted, Base64.NO_WRAP))
-            .apply()
+        runCatching {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            val encrypted = cipher.doFinal(secret.toByteArray(Charsets.UTF_8))
+            preferences.edit()
+                .putString("$storageId.iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                .putString("$storageId.value", Base64.encodeToString(encrypted, Base64.NO_WRAP))
+                .apply()
+        }
     }
 
     fun contains(providerId: String): Boolean = get(providerId) != null
@@ -106,13 +110,23 @@ class ApiKeyVault(context: Context) {
         return getEncrypted(secretKey(providerId, active.id))
     }
 
-    private fun getEncrypted(storageId: String): String? = runCatching {
-        val iv = Base64.decode(preferences.getString("$storageId.iv", null), Base64.NO_WRAP)
-        val encrypted = Base64.decode(preferences.getString("$storageId.value", null), Base64.NO_WRAP)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
-        cipher.doFinal(encrypted).toString(Charsets.UTF_8)
-    }.getOrNull()
+    private fun getEncrypted(storageId: String): String? {
+        val ivString = preferences.getString("$storageId.iv", null) ?: return null
+        val encryptedString = preferences.getString("$storageId.value", null) ?: return null
+        return try {
+            val iv = Base64.decode(ivString, Base64.NO_WRAP)
+            val encrypted = Base64.decode(encryptedString, Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
+            cipher.doFinal(encrypted).toString(Charsets.UTF_8)
+        } catch (e: AEADBadTagException) {
+            null
+        } catch (e: GeneralSecurityException) {
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     private fun removeEncrypted(storageId: String) {
         preferences.edit().remove("$storageId.iv").remove("$storageId.value").apply()
@@ -126,6 +140,10 @@ class ApiKeyVault(context: Context) {
         putEncrypted(secretKey(providerId, legacy.id), legacySecret)
         savePool(providerId, listOf(legacy))
         setActiveId(providerId, legacy.id)
+        preferences.edit()
+            .remove("$providerId.value")
+            .remove("$providerId.iv")
+            .apply()
         return listOf(legacy)
     }
 

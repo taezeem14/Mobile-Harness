@@ -6,9 +6,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.jarves.mh.MainActivity
 import com.jarves.mh.R
 import com.jarves.mh.data.AppPreferences
@@ -245,13 +248,32 @@ class RuntimeSetupService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            releaseWakeLock()
             installJob?.cancel(CancellationException("Stopped by user"))
             RuntimeSetupController.cancelled(this)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-        startForeground(NOTIFICATION_ID, setupNotification(RuntimeSetupController.snapshot.value))
+        val foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        } else {
+            0
+        }
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            setupNotification(RuntimeSetupController.snapshot.value),
+            foregroundServiceType,
+        )
+        if (AppPreferences(this).runtimeSetupComplete ||
+            RuntimeSetupController.snapshot.value.status == RuntimeSetupStatus.COMPLETE) {
+            RuntimeSetupController.complete(this)
+            showFinishedNotification(success = true)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         acquireWakeLock()
         if (installJob?.isActive != true) {
             val stacks = intent?.getStringExtra(EXTRA_STACKS).orEmpty().split(',')

@@ -67,51 +67,76 @@ class AppUpdater(
         val directory = File(context.filesDir, "updates").also { it.mkdirs() }
         val partial = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk.part")
         val target = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk")
-        val connection = URL(info.apkUrl).openConnection() as HttpURLConnection
         try {
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 30_000
-            connection.instanceFollowRedirects = true
-            val code = connection.responseCode
-            check(code in 200..299) { "Update download failed (HTTP $code)" }
-            val total = connection.contentLengthLong.takeIf { it > 0 } ?: info.sizeBytes
-            connection.inputStream.use { input ->
-                partial.outputStream().use { output ->
-                    val buffer = ByteArray(128 * 1024)
-                    var downloaded = 0L
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        output.write(buffer, 0, count)
-                        downloaded += count
-                        progress(downloaded, total)
+            val connection = URL(info.apkUrl).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 30_000
+                connection.instanceFollowRedirects = true
+                val code = connection.responseCode
+                check(code in 200..299) { "Update download failed (HTTP $code)" }
+                val total = connection.contentLengthLong.takeIf { it > 0 } ?: info.sizeBytes
+                connection.inputStream.use { input ->
+                    partial.outputStream().use { output ->
+                        val buffer = ByteArray(128 * 1024)
+                        var downloaded = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            downloaded += count
+                            progress(downloaded, total)
+                        }
                     }
                 }
+            } finally {
+                connection.disconnect()
             }
-        } finally {
-            connection.disconnect()
+            if (info.sha256.isNotBlank()) {
+                val actual = sha256(partial)
+                check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
+            }
+            verifyApk(partial, info.versionCode)
+            if (target.exists()) target.delete()
+            check(partial.renameTo(target)) { "Could not prepare the downloaded update" }
+            return target
+        } catch (e: Throwable) {
+            partial.delete()
+            throw e
         }
-        if (info.sha256.isNotBlank()) {
-            val actual = sha256(partial)
-            check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
-        }
-        verifyApk(partial, info.versionCode)
-        if (target.exists()) target.delete()
-        check(partial.renameTo(target)) { "Could not prepare the downloaded update" }
-        return target
     }
 
     @Suppress("DEPRECATION")
     private fun verifyApk(apk: File, expectedVersionCode: Long) {
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES
+        } else {
+            PackageManager.GET_SIGNATURES
+        }
         val archive = context.packageManager.getPackageArchiveInfo(apk.absolutePath, flags)
             ?: error("Downloaded file is not a valid APK")
         check(archive.packageName == context.packageName) { "Update package name does not match Mobile Harness" }
         val archiveVersion = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.longVersionCode else archive.versionCode.toLong()
         check(archiveVersion == expectedVersionCode && archiveVersion > BuildConfig.VERSION_CODE) { "Update version does not match its manifest" }
         val installed = context.packageManager.getPackageInfo(context.packageName, flags)
-        val archiveSignatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.signingInfo?.apkContentsSigners else archive.signatures
-        val installedSignatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) installed.signingInfo?.apkContentsSigners else installed.signatures
+        val archiveSignatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = archive.signingInfo
+            val sigs = if (signingInfo != null) {
+                if (signingInfo.hasMultipleSigners()) signingInfo.apkContentsSigners else signingInfo.signingCertificateHistory
+            } else null
+            sigs ?: archive.signatures
+        } else {
+            archive.signatures
+        }
+        val installedSignatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = installed.signingInfo
+            val sigs = if (signingInfo != null) {
+                if (signingInfo.hasMultipleSigners()) signingInfo.apkContentsSigners else signingInfo.signingCertificateHistory
+            } else null
+            sigs ?: installed.signatures
+        } else {
+            installed.signatures
+        }
         check(!archiveSignatures.isNullOrEmpty() && !installedSignatures.isNullOrEmpty() &&
             archiveSignatures.map { sha256(it.toByteArray()) }.toSet() == installedSignatures.map { sha256(it.toByteArray()) }.toSet()
         ) { "Update is not signed with the installed app's signing key" }

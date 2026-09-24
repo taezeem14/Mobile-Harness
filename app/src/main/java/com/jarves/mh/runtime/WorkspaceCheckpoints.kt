@@ -4,6 +4,8 @@ import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.DiffLine
 import com.jarves.mh.model.DiffLineType
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
@@ -62,35 +64,70 @@ class WorkspaceCheckpoints(private val filesDir: File) {
                 val relative = source.relativeTo(workspace).invariantSeparatorsPath
                 val destination = safeWorkspaceFile(backup, relative)
                 destination.parentFile?.mkdirs()
+                if (Files.isSymbolicLink(destination.toPath())) {
+                    Files.delete(destination.toPath())
+                }
                 source.copyTo(destination, overwrite = true)
             }
     }
 
     fun saveChangedPaths(projectId: String, paths: List<String>) {
         val manifest = File(checkpointDir(projectId), "changes.json")
-        manifest.parentFile?.mkdirs()
-        val merged = (readChangedPaths(projectId) + paths)
+        val existing = readChangedPathsOrNull(projectId) ?: emptyList()
+        val merged = (existing + paths)
             .filterNot(::isInternalRuntimePath)
             .distinct()
             .sorted()
-        manifest.writeText(JSONArray(merged).toString())
+        writeAtomic(manifest, JSONArray(merged).toString())
     }
 
-    fun readChangedPaths(projectId: String): List<String> {
+    fun readChangedPaths(projectId: String): List<String> =
+        readChangedPathsOrNull(projectId) ?: emptyList()
+
+    private fun readChangedPathsOrNull(projectId: String): List<String>? {
         val manifest = File(checkpointDir(projectId), "changes.json")
         if (!manifest.isFile) return emptyList()
         return runCatching {
             val array = JSONArray(manifest.readText())
             (0 until array.length()).map(array::getString)
-        }.getOrDefault(emptyList())
+        }.getOrNull()
     }
 
     fun removeChangedPath(projectId: String, path: String) {
-        val remaining = readChangedPaths(projectId).filterNot { it == path }
+        val manifest = File(checkpointDir(projectId), "changes.json")
+        if (!manifest.isFile) return
+        val existing = readChangedPathsOrNull(projectId) ?: return
+        val remaining = existing.filterNot { it == path }
         if (remaining.isEmpty()) {
             checkpointDir(projectId).deleteRecursively()
         } else {
-            File(checkpointDir(projectId), "changes.json").writeText(JSONArray(remaining).toString())
+            writeAtomic(manifest, JSONArray(remaining).toString())
+        }
+    }
+
+    private fun writeAtomic(target: File, content: String) {
+        val parent = target.parentFile ?: return
+        parent.mkdirs()
+        val temp = File.createTempFile("changes-", ".tmp", parent)
+        try {
+            temp.writeText(content)
+            try {
+                Files.move(
+                    temp.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: java.io.IOException) {
+                Files.move(
+                    temp.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+        } catch (e: Exception) {
+            temp.delete()
+            throw e
         }
     }
 
@@ -220,12 +257,63 @@ class WorkspaceCheckpoints(private val filesDir: File) {
         val rootPath = root.canonicalFile.toPath()
         val parentPath = (file.parentFile ?: root).canonicalFile.toPath()
         require(parentPath.startsWith(rootPath)) { "Workspace path escapes project" }
+        require(file.canonicalFile.toPath().startsWith(rootPath)) { "Workspace path escapes project" }
         return file
     }
 
+    fun restore(workspace: File, backup: File, path: String) {
+        val target = safeWorkspaceFile(workspace, path)
+        val original = safeWorkspaceFile(backup, path)
+        if (original.isFile) {
+            target.parentFile?.mkdirs()
+            if (Files.isSymbolicLink(target.toPath())) {
+                Files.delete(target.toPath())
+            }
+            original.copyTo(target, overwrite = true)
+        } else if (target.isFile || Files.isSymbolicLink(target.toPath())) {
+            Files.deleteIfExists(target.toPath())
+        }
+    }
+
+    fun acceptFileChange(workspace: File, backup: File, path: String) {
+        val current = safeWorkspaceFile(workspace, path)
+        val baseline = safeWorkspaceFile(backup, path)
+        if (current.isFile) {
+            baseline.parentFile?.mkdirs()
+            if (Files.isSymbolicLink(baseline.toPath())) {
+                Files.delete(baseline.toPath())
+            }
+            current.copyTo(baseline, overwrite = true)
+        } else if (baseline.isFile || Files.isSymbolicLink(baseline.toPath())) {
+            Files.deleteIfExists(baseline.toPath())
+        }
+    }
+
+    fun restore(projectId: String, path: String): Boolean {
+        if (isInternalRuntimePath(path) || path !in readChangedPaths(projectId)) return false
+        val workspace = ensureWorkspace(projectId)
+        val backup = File(checkpointDir(projectId), "project")
+        restore(workspace, backup, path)
+        removeChangedPath(projectId, path)
+        return true
+    }
+
+    fun acceptFileChange(projectId: String, path: String): Boolean {
+        if (isInternalRuntimePath(path) || path !in readChangedPaths(projectId)) return false
+        val workspace = ensureWorkspace(projectId)
+        val backup = File(checkpointDir(projectId), "project")
+        acceptFileChange(workspace, backup, path)
+        removeChangedPath(projectId, path)
+        return true
+    }
+
     fun snapshot(root: File): Map<String, String> = root.walkTopDown()
-        .filter { it.isFile && !isInternalRuntimePath(it.relativeTo(root).invariantSeparatorsPath) }
-        .associate { it.relativeTo(root).path to digest(it) }
+        .filter {
+            it.isFile &&
+                !Files.isSymbolicLink(it.toPath()) &&
+                !isInternalRuntimePath(it.relativeTo(root).invariantSeparatorsPath)
+        }
+        .associate { it.relativeTo(root).invariantSeparatorsPath to digest(it) }
 
     fun changedFiles(root: File, before: Map<String, String>): List<String> {
         val after = snapshot(root)

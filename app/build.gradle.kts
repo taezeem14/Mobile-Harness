@@ -77,7 +77,7 @@ android {
             ?: providers.environmentVariable("ANDROID_HOME").orNull
             ?: providers.environmentVariable("ANDROID_SDK_ROOT").orNull
             ?: osDefaultSdk
-        val versionRegex = Regex("""^\d+(\.\d+)+.*$""")
+        val versionRegex = Regex("""^\d+(\.\d+)+$""")
         fun parseNdkRevision(sourceProps: File): String? {
             if (!sourceProps.isFile) return null
             return runCatching {
@@ -109,7 +109,17 @@ android {
 
         ndkVersion = when {
             "26.1.10909125" in discoveredNdks -> "26.1.10909125"
-            discoveredNdks.isNotEmpty() -> discoveredNdks.sorted().last()
+            discoveredNdks.isNotEmpty() -> discoveredNdks.sortedWith { a, b ->
+                val aParts = a.split('.').map { it.toLongOrNull() ?: 0L }
+                val bParts = b.split('.').map { it.toLongOrNull() ?: 0L }
+                val maxLen = maxOf(aParts.size, bParts.size)
+                for (i in 0 until maxLen) {
+                    val aPart = aParts.getOrElse(i) { 0L }
+                    val bPart = bParts.getOrElse(i) { 0L }
+                    if (aPart != bPart) return@sortedWith aPart.compareTo(bPart)
+                }
+                0
+            }.last()
             else -> "26.1.10909125"
         }
     }
@@ -117,6 +127,7 @@ android {
     signingConfigs {
         if (hasUploadSigning) {
             create("upload") {
+                require(rootProject.file(uploadStorePath!!).exists())
                 storeFile = rootProject.file(checkNotNull(uploadStorePath))
                 storePassword = checkNotNull(uploadStorePassword)
                 keyAlias = checkNotNull(uploadKeyAlias)

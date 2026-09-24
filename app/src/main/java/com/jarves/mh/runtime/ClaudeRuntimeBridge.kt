@@ -46,17 +46,36 @@ internal object ProviderRuntimeErrorDetector {
                 append(it.optString("result"))
             }
         }.lowercase()
+
+        val isApiErrorEvent = json != null && (
+            json.optString("type") in setOf("error", "api_error") ||
+            json.optString("subtype") in setOf("api_retry", "api_error", "error") ||
+            json.has("error") || json.has("error_status") ||
+            json.optBoolean("is_error")
+        )
+        val isPlainTextError = json == null && (
+            "api error" in combined ||
+            "failed to authenticate" in combined ||
+            "unauthorized" in combined ||
+            "error:" in combined
+        )
+
         return when {
             "user not found" in combined -> "User not found. Check the API key and provider account."
             "authentication_failed" in combined ||
                 "authentication failed" in combined ||
+                "authentication_error" in combined ||
                 "invalid api key" in combined ||
+                "invalid_api_key" in combined ||
                 "http 401" in combined ||
                 "http 403" in combined ||
                 "http 429" in combined ||
-                "expired" in combined ||
-                "quota" in combined ||
-                "rate limit" in combined ||
+                ((isApiErrorEvent || isPlainTextError) && (
+                    "expired" in combined ||
+                    "quota" in combined ||
+                    "rate limit" in combined ||
+                    "rate_limit" in combined
+                )) ||
                 (json?.optString("subtype") == "api_retry" && json.optInt("error_status") in listOf(401, 403, 429)) ->
                 "The provider rejected the saved API key."
             else -> null
@@ -608,14 +627,18 @@ class ClaudeRuntimeBridge(
 
     private fun buildContextPrompt(currentPrompt: String, history: List<ChatMessage>, guestWorkspacePath: String, projectKind: ProjectKind): String {
         // Filter out the current prompt (last user message), system greeting, and any error messages
-        val priorMessages = history
+        val filtered = history
             .filter { msg ->
                 (msg.fromUser || !msg.text.startsWith("Hi! Tell me")) &&
                 !msg.text.startsWith("Failed to") &&
                 !msg.text.startsWith("Error:") &&
                 !msg.text.contains("API Error")
             }
-            .dropLast(1) // Drop the current prompt which was just added
+        val priorMessages = if (filtered.lastOrNull()?.text == currentPrompt) {
+            filtered.dropLast(1)
+        } else {
+            filtered
+        }
 
         val sb = StringBuilder()
         sb.appendLine("<project_workspace>")
@@ -639,6 +662,8 @@ class ClaudeRuntimeBridge(
         }
         if (installer.isStackInstalled(DevStack.FLUTTER)) {
             sb.appendLine("If this is a Flutter project, Flutter and Dart are installed. You can create projects with `flutter create .` and run live web previews with `flutter run -d web-server --web-port 8080 --web-hostname 127.0.0.1` so the in-app Web Preview can display it.")
+        } else {
+            sb.appendLine("Flutter and Dart are not installed. Do not run or suggest flutter or dart commands.")
         }
         sb.appendLine("For local servers, give a clear start command and never use a kill command that searches its own command text with pgrep, because it can terminate the terminal itself.")
         sb.appendLine("</project_workspace>")
@@ -874,7 +899,7 @@ class ClaudeRuntimeBridge(
 
     private fun snapshot(root: File): Map<String, String> = root.walkTopDown()
         .filter { it.isFile && !isInternalRuntimePath(it.relativeTo(root).invariantSeparatorsPath) }
-        .associate { it.relativeTo(root).path to digest(it) }
+        .associate { it.relativeTo(root).invariantSeparatorsPath to digest(it) }
 
     private fun changedFiles(root: File, before: Map<String, String>): List<String> {
         val after = snapshot(root)

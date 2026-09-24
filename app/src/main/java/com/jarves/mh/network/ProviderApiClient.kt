@@ -164,12 +164,15 @@ class ProviderApiClient {
                 }
                 if (body != null) doOutput = true
             }
-            if (body != null) connection.outputStream.use { it.write(body.toByteArray()) }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val responseBody = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            connection.disconnect()
-            HttpResult(code, responseBody)
+            try {
+                if (body != null) connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val responseBody = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                HttpResult(code, responseBody)
+            } finally {
+                connection.disconnect()
+            }
         }.getOrElse { HttpResult(0, "", it.message ?: "Network connection failed",) }
     }
 
@@ -278,9 +281,10 @@ object ModelResponseParser {
                         if (id.isNotBlank()) {
                             val label = item.optString("display_name").ifBlank { item.optString("displayName") }.ifBlank { id }
                             val pricing = item.optJSONObject("pricing")
-                            val free = id.endsWith(":free", ignoreCase = true) || pricing?.let {
-                                listOf("prompt", "completion", "request").all { field ->
-                                    it.optString(field, "0").toDoubleOrNull() == 0.0
+                            val pricingKeys = listOf("prompt", "completion", "request")
+                            val free = id.endsWith(":free", ignoreCase = true) || pricing?.let { p ->
+                                pricingKeys.any { p.has(it) } && pricingKeys.all { field ->
+                                    !p.has(field) || p.optString(field).toDoubleOrNull() == 0.0
                                 }
                             } == true
                             add(DiscoveredModel(id, label, free))

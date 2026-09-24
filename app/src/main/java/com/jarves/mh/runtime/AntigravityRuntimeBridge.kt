@@ -195,6 +195,7 @@ class AntigravityRuntimeBridge(
                     process.outputStream.flush()
                     process.outputStream.close()
                     var offset = 0L
+                    var leftoverBytes = ByteArray(0)
                     val pending = StringBuilder()
                     var reply: String? = null
                     fun handleLine(line: String): Boolean {
@@ -218,14 +219,28 @@ class AntigravityRuntimeBridge(
                             delay(100)
                             continue
                         }
-                        val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
+                        val rawBytes = ByteArray(minOf(available, 16L * 1024).toInt())
                         val count = RandomAccessFile(outputFile, "r").use { file ->
                             file.seek(offset)
-                            file.read(bytes)
+                            file.read(rawBytes)
                         }
                         if (count <= 0) continue
                         offset += count
-                        pending.append(bytes.decodeToString(0, count))
+                        val totalBytes = if (leftoverBytes.isNotEmpty()) leftoverBytes + rawBytes.copyOf(count) else rawBytes.copyOf(count)
+                        val incomplete = if (process.isAlive || outputFile.length() > offset) {
+                            trailingIncompleteUtf8Bytes(totalBytes, totalBytes.size)
+                        } else {
+                            0
+                        }
+                        val validLength = totalBytes.size - incomplete
+                        if (validLength > 0) {
+                            pending.append(totalBytes.decodeToString(0, validLength))
+                        }
+                        leftoverBytes = if (incomplete > 0) {
+                            totalBytes.copyOfRange(validLength, totalBytes.size)
+                        } else {
+                            ByteArray(0)
+                        }
                         var newline = pending.indexOf("\n")
                         while (newline >= 0) {
                             val line = pending.substring(0, newline).trimEnd('\r')
@@ -236,6 +251,10 @@ class AntigravityRuntimeBridge(
                             }
                             newline = pending.indexOf("\n")
                         }
+                    }
+                    if (leftoverBytes.isNotEmpty()) {
+                        pending.append(leftoverBytes.decodeToString())
+                        leftoverBytes = ByteArray(0)
                     }
                     pending.toString().trim().takeIf(String::isNotEmpty)?.let { if (!done) done = handleLine(it) }
                     // Drain process exit without hanging past the timeout.
@@ -249,6 +268,7 @@ class AntigravityRuntimeBridge(
                     runCatching {
                         if (process.isAlive) process.destroyForcibly()
                     }
+                    runCatching { process.waitFor() }
                     runCatching { outputFile.delete() }
                     runCatching { probeDir.deleteRecursively() }
                 }
@@ -280,7 +300,15 @@ class AntigravityRuntimeBridge(
         runCatching {
             RuntimeTaskController.stopAction = {
                 userStopRequested = true
-                activeProcess?.destroy()
+                val running = activeProcess
+                if (running != null) {
+                    Thread {
+                        running.destroy()
+                        Thread.sleep(500)
+                        if (running.isAlive) running.destroyForcibly()
+                        runCatching { running.waitFor() }
+                    }.start()
+                }
             }
             startForegroundRuntime(projectSlug)
             val installed = installer.installedRuntime()
@@ -309,6 +337,7 @@ class AntigravityRuntimeBridge(
 
             val native = process as? NativeSpawnProcess ?: error("Unsupported Antigravity process")
             var offset = 0L
+            var leftoverBytes = ByteArray(0)
             val pending = StringBuilder()
             var resultSeen = false
             var assistantTextSeen = false
@@ -334,30 +363,54 @@ class AntigravityRuntimeBridge(
                     null -> Unit
                 }
             }
+
+            suspend fun drainOutput(finalPass: Boolean) {
+                while (native.outputFile.length() > offset) {
+                    val available = native.outputFile.length() - offset
+                    if (available <= 0) break
+                    val rawBytes = ByteArray(minOf(available, 16L * 1024).toInt())
+                    val count = RandomAccessFile(native.outputFile, "r").use { file ->
+                        file.seek(offset)
+                        file.read(rawBytes)
+                    }
+                    if (count <= 0) break
+                    offset += count
+                    val totalBytes = if (leftoverBytes.isNotEmpty()) leftoverBytes + rawBytes.copyOf(count) else rawBytes.copyOf(count)
+                    val incomplete = if (!finalPass) trailingIncompleteUtf8Bytes(totalBytes, totalBytes.size) else 0
+                    val validLength = totalBytes.size - incomplete
+                    if (validLength > 0) {
+                        pending.append(totalBytes.decodeToString(0, validLength))
+                    }
+                    leftoverBytes = if (incomplete > 0) {
+                        totalBytes.copyOfRange(validLength, totalBytes.size)
+                    } else {
+                        ByteArray(0)
+                    }
+                    var newline = pending.indexOf("\n")
+                    while (newline >= 0) {
+                        val line = pending.substring(0, newline).trimEnd('\r')
+                        pending.delete(0, newline + 1)
+                        if (line.isNotBlank()) handleLine(line)
+                        newline = pending.indexOf("\n")
+                    }
+                }
+            }
+
             while (process.isAlive || native.outputFile.length() > offset) {
-                val available = native.outputFile.length() - offset
-                if (available <= 0) {
+                if (native.outputFile.length() <= offset) {
                     delay(50)
                     continue
                 }
-                val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-                val count = RandomAccessFile(native.outputFile, "r").use { file ->
-                    file.seek(offset)
-                    file.read(bytes)
-                }
-                if (count <= 0) continue
-                offset += count
-                pending.append(bytes.decodeToString(0, count))
-                var newline = pending.indexOf("\n")
-                while (newline >= 0) {
-                    val line = pending.substring(0, newline).trimEnd('\r')
-                    pending.delete(0, newline + 1)
-                    handleLine(line)
-                    newline = pending.indexOf("\n")
-                }
+                drainOutput(finalPass = false)
+            }
+            val exit = process.waitFor()
+            // Final drain pass on outputFile after process exits before evaluating resultSeen
+            drainOutput(finalPass = true)
+            if (leftoverBytes.isNotEmpty()) {
+                pending.append(leftoverBytes.decodeToString())
+                leftoverBytes = ByteArray(0)
             }
             pending.toString().trim().takeIf(String::isNotEmpty)?.let { handleLine(it) }
-            val exit = process.waitFor()
             check(exit == 0 && resultSeen) {
                 friendlyError(pending.toString().takeLast(1_000).ifBlank { "Antigravity exited with code $exit" })
             }
@@ -369,6 +422,14 @@ class AntigravityRuntimeBridge(
             emitCompleted(sessionId)
             finishForegroundRuntime(true, projectSlug, "Antigravity finished the task in $projectSlug.")
         }.onFailure {
+            val running = activeProcess
+            if (running != null && running.isAlive) {
+                running.destroy()
+                runCatching {
+                    if (running.isAlive) running.destroyForcibly()
+                }
+                runCatching { running.waitFor() }
+            }
             val message = if (userStopRequested) "Stopped by user" else friendlyError(it.message.orEmpty())
             emitFailure(sessionId, message)
             if (userStopRequested) cancelForegroundRuntime()
@@ -386,10 +447,16 @@ class AntigravityRuntimeBridge(
         // product choice, so no Antigravity approval can be pending here.
     }
 
-    override suspend fun stopSession(sessionId: String) {
+    override suspend fun stopSession(sessionId: String) = withContext(Dispatchers.IO) {
         if (activeSessionId == sessionId) {
             userStopRequested = true
-            activeProcess?.destroy()
+            val proc = activeProcess
+            proc?.destroy()
+            delay(500)
+            if (proc?.isAlive == true) {
+                proc.destroyForcibly()
+            }
+            runCatching { proc?.waitFor() }
             emitFailure(sessionId, "Stopped by user")
         }
     }
@@ -545,3 +612,21 @@ internal fun antigravityWorkspacePrompt(projectSlug: String, prompt: String): St
 
     $prompt
 """.trimIndent()
+
+internal fun trailingIncompleteUtf8Bytes(bytes: ByteArray, length: Int): Int {
+    if (length <= 0) return 0
+    for (i in 1..minOf(4, length)) {
+        val b = bytes[length - i].toInt() and 0xFF
+        if ((b and 0x80) == 0) return 0
+        if ((b and 0xC0) == 0xC0) {
+            val expectedTotal = when {
+                (b and 0xE0) == 0xC0 -> 2
+                (b and 0xF0) == 0xE0 -> 3
+                (b and 0xF8) == 0xF0 -> 4
+                else -> 1
+            }
+            return if (i < expectedTotal) i else 0
+        }
+    }
+    return 0
+}
