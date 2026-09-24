@@ -892,12 +892,13 @@ class RuntimeInstaller(private val context: Context) {
             onProgress(RuntimeInstallProgress("Downloading Flutter SDK $FLUTTER_VERSION", (from + to) / 2f, indeterminate = true))
             runGuestCommand(
                 proot = proot,
-                command = "rm -rf /opt/flutter && " +
+                command = "touch /.dockerenv 2>/dev/null || true && " +
+                    "rm -rf /opt/flutter && " +
                     "git clone --depth 1 --branch $FLUTTER_VERSION $FLUTTER_GIT_REPO /opt/flutter && " +
                     "git config --global --add safe.directory /opt/flutter 2>/dev/null || true && " +
                     "ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && " +
                     "ln -sf /opt/flutter/bin/dart /usr/local/bin/dart && " +
-                    "/opt/flutter/bin/flutter config --no-analytics",
+                    "CI=true /opt/flutter/bin/flutter config --no-analytics",
                 displayCommand = "git clone Flutter SDK $FLUTTER_VERSION & configure CLI",
                 fraction = to,
                 timeoutMs = 30 * 60 * 1_000L,
@@ -919,7 +920,7 @@ class RuntimeInstaller(private val context: Context) {
                 proot,
                 "git config --global --add safe.directory /opt/flutter 2>/dev/null || true && " +
                     "cd /opt/flutter && test \"$(git rev-parse HEAD)\" = \"$FLUTTER_COMMIT_SHA\" && " +
-                    "flutter --version && dart --version",
+                    "CI=true flutter --version && CI=true dart --version",
                 "Flutter & Dart tools could not be verified",
             )
         }.onSuccess {
@@ -1501,6 +1502,10 @@ class RuntimeInstaller(private val context: Context) {
                     Os.symlink(destination, link.absolutePath)
                 }
             }
+            val dockerEnv = File(rootfs, ".dockerenv")
+            if (!dockerEnv.exists()) {
+                runCatching { dockerEnv.createNewFile() }
+            }
             File(rootfs, "usr/bin/env").canExecute() &&
                 File(rootfs, "usr/bin/bash").canExecute() &&
                 File(rootfs, "lib/ld-linux-aarch64.so.1").exists()
@@ -1608,6 +1613,7 @@ class RuntimeInstaller(private val context: Context) {
             argv = args,
             environment = buildMap {
                 put("HOME", "/root")
+                put("CI", "true")
                 val androidReady = File(rootfs, "root/.pocket-android-tools-version").readTextOrNull() == ANDROID_TOOLS_VERSION
                 val basePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 if (androidReady) {
